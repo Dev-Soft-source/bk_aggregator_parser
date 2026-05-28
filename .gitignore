@@ -1,0 +1,71 @@
+# --- Python ---
+backend/__pycache__/
+backend/adapters/__pycache__/
+backend/fontbet/__pycache__/
+backend/scripts/__pycache__/
+backend/.env
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+.eggs/
+dist/
+build/
+pip-wheel-metadata/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# --- Node / Next.js ---
+node_modules/
+.npm
+.pnp
+docs/Appendix_A_sports_EN.md
+docs/Appendix_C_markets_EN.md
+docs/TODO.md
+docs/WORKFLOW.md
+docs/TZ_bookmaker_parsing_COMPLETE_EN.md
+docs/REVIEW.md
+docs/DATABASE.md
+
+# --- Logs & debug ---
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+# --- Database dumps (local backups) ---
+*.dump
+*.sql.gz
+# --- OS ---
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# --- Editors / IDEs ---
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+# --- Misc local artifacts ---
+*.pem
+.cache/
+# Accidental empty shim (do not commit)
+backend/python
