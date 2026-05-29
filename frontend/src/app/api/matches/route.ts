@@ -9,7 +9,7 @@ export async function GET(request: NextRequest) {
   try {
     const { searchParams } = request.nextUrl;
     const place = searchParams.get("place") || "live";
-    const limit = Math.min(Number(searchParams.get("limit") ?? 80), 200);
+    const limit = Math.min(Number(searchParams.get("limit") ?? 5000), 5000);
 
     const { matches, stats } = await fetchLiveDashboard(
       place === "all" ? null : place,

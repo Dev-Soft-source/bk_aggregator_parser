@@ -1,0 +1,19 @@
+curl 'https://lds-api-sites.ligastavok.ru/rest/events/v8/eventsList' \
+  -X 'POST' \
+  -H 'Accept-Language: en-US,en;q=0.9' \
+  -H 'Connection: keep-alive' \
+  -H 'Content-Length: 110' \
+  -b '__zzatgib-w-ligastavok=MDA0dBA=Fz2+aQ==; _ga=GA1.1.1065960831.1779818701; _ym_uid=1779818701737444290; _ym_d=1779818701; _ym_isad=2; _ga_Y35SX19KN6=GS2.1.s1780074363$o13$g1$t1780076167$j59$l0$h77104615; cfidsgib-w-ligastavok=kMMIei/4lpSfzAr0MI4Pmq8BGL8a+cqrdSy9qQgA9pjKmLq+tQe8gtrZSseFjS/aA6b+FeMNRgdkOVYuFiyP1NR1AfMF35vP64PW+j4FUV9P67rpsLt03A9OsXIQwxmOagvRdfXwzjBJ3qHv8wKJwqnK6s2o8n2LHHy7bjA=; gsscgib-w-ligastavok=tyv6uUkDbP1amHfxhqNshhe59XU//r6stMEF+eLgJqXkVWFbcBqnt24MMFTm5X5arOVqYj+CFs306nmijNDdepVTQm7t1/+CuJEPwwVz3ykSCOBU/xIiEfB6xgASIStKNGmy8IoaFJ387rNbMj23X5EKP7Nir3MoxhC4cQk1gn6hVb1K8ZsoObwt33WeMz5yhTqBg/mOREE1goVGTjcLqsSEnT7Xml3L8F3P82SRSGgd++SJ+zTc4mgcchQBz7udzvpywozvwpD0Kg==; qrator_jsr=v2.0.1780078040.371.3207fdcaVeNsqcmK|Xwgw7PjbshJAC7T8|Z6BeTgwgi4vVAMsDrN6DKVWkEQFIfzRVbytJZOZCOOnNvTMKta3g256vbvYuBZqAuaKZaDD0Sny+BddhoefgZQ==-YgitEDtB9mmxT0Bze/x8tIqLZ5A=-00; qrator_jsid2=v2.0.1780078040.371.3207fdcaVeNsqcmK|IbjdChYx3Ibb45GB|WF2soNp0b25f7z5Cq9rAnqSBBDwZzq8svXHEt6HORtxil0ACYR8Qgzswf+W2ku6WD7xbEPfLyMqYdy2q4c2anQ9sBz/IzLMWtyXTDpSBRW964yCZtXyT1bOBj7NPB9j0Fm0OJI0HFt49WzPSxp2pqoJANSAkGGMpDYRIZ8G651s=-wOIlDD+6yghe8+VtBkdyA22n10E=' \
+  -H 'Origin: https://www.ligastavok.ru' \
+  -H 'Referer: https://www.ligastavok.ru/' \
+  -H 'Sec-Fetch-Dest: empty' \
+  -H 'Sec-Fetch-Mode: cors' \
+  -H 'Sec-Fetch-Site: same-site' \
+  -H 'User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36' \
+  -H 'accept: application/json' \
+  -H 'content-type: application/json' \
+  -H 'sec-ch-ua: "Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"' \
+  -H 'sec-ch-ua-mobile: ?0' \
+  -H 'sec-ch-ua-platform: "Windows"' \
+  -H 'x-application-name: mobile' \
+  -H 'x-req-id: c0ef3534-452b-3790-b166-57dcfb598d08'

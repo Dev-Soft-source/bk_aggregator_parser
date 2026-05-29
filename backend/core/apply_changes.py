@@ -1,0 +1,300 @@
+"""Apply normalized adapter changes to PostgreSQL (Fonbet-compatible schema)."""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from typing import Any
+
+import psycopg2.extras
+
+from adapters.base import Change, ChangeType
+from fonbet.parsers import event_year_from_start_time, normalize_line_param, unix_to_datetime
+from retention import current_utc_year, prune_snapshots, prune_stale_matches
+
+# Frontend queries use ODDS_FACTOR_IDS=921,923 — map Liga Stavok 2-way line to same slots.
+NORMALIZED_FACTOR_IDS: tuple[int, ...] = (921, 923)
+
+
+def _upsert_site(cur: psycopg2.extensions.cursor, name: str) -> int:
+    cur.execute(
+        """
+        INSERT INTO sites (name)
+        VALUES (%s)
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (name,),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _upsert_country(cur: psycopg2.extensions.cursor, name: str) -> int:
+    cur.execute(
+        """
+        INSERT INTO countries (name)
+        VALUES (%s)
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+        """,
+        (name,),
+    )
+    row = cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def _group_latest(changes: list[Change]) -> dict[int, dict[ChangeType, Change]]:
+    by_match: dict[int, dict[ChangeType, Change]] = defaultdict(dict)
+    for change in changes:
+        by_match[change.match_payload_id][change.change_type] = change
+    return by_match
+
+
+def apply_changes(
+    conn,
+    changes: list[Change],
+    *,
+    site_name: str,
+    packet_version: int,
+    source_file: str = "ligastavok",
+    retain_snapshot_years: int = 1,
+    prune_matches_before_year: int | None = None,
+) -> tuple[int, dict[str, int]]:
+    """Write adapter changes to PostgreSQL. Returns (snapshot_id, counts)."""
+    grouped = _group_latest(changes)
+    import_year = current_utc_year()
+
+    counts = {
+        "sports": 0,
+        "leagues": 0,
+        "matches": 0,
+        "scores_updated": 0,
+        "odds_lines": 0,
+        "snapshots_deleted": 0,
+        "matches_deleted": 0,
+    }
+
+    with conn.cursor() as cur:
+        site_id = _upsert_site(cur, site_name)
+        cur.execute(
+            """
+            INSERT INTO import_snapshots (site_id, source_file, packet_version, year)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+            """,
+            (site_id, source_file, packet_version, import_year),
+        )
+        snapshot_id = int(cur.fetchone()[0])
+
+        country_ids: dict[str, int] = {}
+        seen_sports: set[int] = set()
+        seen_leagues: set[int] = set()
+        match_ids: set[int] = set()
+
+        for match_id, type_map in grouped.items():
+            fixture = type_map.get(ChangeType.FIXTURE)
+            if not fixture:
+                continue
+
+            payload = fixture.payload
+            sport_id = int(payload["sport_payload_id"])
+            league_id = int(payload["league_payload_id"])
+
+            if sport_id not in seen_sports:
+                cur.execute(
+                    """
+                    INSERT INTO sports (site_id, id, name_en, reference_sport_id)
+                    VALUES (%s, %s, %s, NULL)
+                    ON CONFLICT (site_id, id) DO UPDATE
+                    SET name_en = EXCLUDED.name_en
+                    """,
+                    (site_id, sport_id, payload.get("sport_name") or f"Sport {sport_id}"),
+                )
+                seen_sports.add(sport_id)
+                counts["sports"] += 1
+
+            if league_id not in seen_leagues:
+                country_name = payload.get("country_name")
+                country_id = None
+                if country_name:
+                    if country_name not in country_ids:
+                        country_ids[country_name] = _upsert_country(cur, str(country_name))
+                    country_id = country_ids[country_name]
+
+                cur.execute(
+                    """
+                    INSERT INTO leagues (site_id, id, sport_id, country_id, name)
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (site_id, id) DO UPDATE
+                    SET sport_id = EXCLUDED.sport_id,
+                        country_id = EXCLUDED.country_id,
+                        name = EXCLUDED.name
+                    """,
+                    (
+                        site_id,
+                        league_id,
+                        sport_id,
+                        country_id,
+                        payload.get("league_name") or f"League {league_id}",
+                    ),
+                )
+                seen_leagues.add(league_id)
+                counts["leagues"] += 1
+
+            start_time = unix_to_datetime(payload.get("start_time_unix"))
+            event_year = event_year_from_start_time(start_time, import_year)
+
+            cur.execute(
+                """
+                INSERT INTO matches (
+                    site_id, id, league_id, sport_id, team1, team2,
+                    start_time, event_year, place, priority, snapshot_id
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (site_id, id) DO UPDATE
+                SET league_id = EXCLUDED.league_id,
+                    sport_id = EXCLUDED.sport_id,
+                    team1 = EXCLUDED.team1,
+                    team2 = EXCLUDED.team2,
+                    start_time = EXCLUDED.start_time,
+                    event_year = EXCLUDED.event_year,
+                    place = EXCLUDED.place,
+                    priority = EXCLUDED.priority,
+                    snapshot_id = EXCLUDED.snapshot_id
+                """,
+                (
+                    site_id,
+                    match_id,
+                    league_id,
+                    sport_id,
+                    payload.get("team1"),
+                    payload.get("team2"),
+                    start_time,
+                    event_year,
+                    payload.get("place", "unknown"),
+                    payload.get("priority"),
+                    snapshot_id,
+                ),
+            )
+            match_ids.add(match_id)
+            counts["matches"] += 1
+
+            score_change = type_map.get(ChangeType.SCORE)
+            if score_change:
+                sp = score_change.payload
+                cur.execute(
+                    """
+                    INSERT INTO match_scores (
+                        site_id, match_id, score1, score2, timer_seconds,
+                        timer_display, raw_scores, snapshot_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (site_id, match_id) DO UPDATE
+                    SET score1 = EXCLUDED.score1,
+                        score2 = EXCLUDED.score2,
+                        timer_seconds = EXCLUDED.timer_seconds,
+                        timer_display = EXCLUDED.timer_display,
+                        raw_scores = EXCLUDED.raw_scores,
+                        snapshot_id = EXCLUDED.snapshot_id
+                    """,
+                    (
+                        site_id,
+                        match_id,
+                        sp.get("score1"),
+                        sp.get("score2"),
+                        sp.get("timer_seconds"),
+                        sp.get("timer_display"),
+                        psycopg2.extras.Json(sp.get("raw_scores"))
+                        if sp.get("raw_scores")
+                        else None,
+                        snapshot_id,
+                    ),
+                )
+                counts["scores_updated"] += 1
+
+            status_change = type_map.get(ChangeType.BETTING_STATUS)
+            if status_change:
+                cur.execute(
+                    """
+                    INSERT INTO betting_status (site_id, match_id, state, snapshot_id)
+                    VALUES (%s, %s, %s, %s)
+                    ON CONFLICT (site_id, match_id) DO UPDATE
+                    SET state = EXCLUDED.state,
+                        snapshot_id = EXCLUDED.snapshot_id
+                    """,
+                    (
+                        site_id,
+                        match_id,
+                        status_change.payload.get("state", "unknown"),
+                        snapshot_id,
+                    ),
+                )
+
+            odds_change = type_map.get(ChangeType.ODDS)
+            if odds_change:
+                op = odds_change.payload
+                outcomes = op.get("outcomes") or []
+                odds_rows: list[tuple[Any, ...]] = []
+                for idx, outcome in enumerate(outcomes[: len(NORMALIZED_FACTOR_IDS)]):
+                    factor_id = NORMALIZED_FACTOR_IDS[idx]
+                    odds_rows.append(
+                        (
+                            site_id,
+                            match_id,
+                            match_id,
+                            op.get("market_event_name") or "main",
+                            factor_id,
+                            outcome.get("odds"),
+                            normalize_line_param(outcome.get("line_param")),
+                            outcome.get("factor_id"),
+                            outcome.get("line_param_text"),
+                            bool(outcome.get("is_handicap_total")),
+                            snapshot_id,
+                        )
+                    )
+
+                if odds_rows:
+                    cur.execute(
+                        """
+                        DELETE FROM odds_lines
+                        WHERE site_id = %s
+                          AND match_id = %s
+                          AND factor_id <> ALL(%s)
+                        """,
+                        (site_id, match_id, list(NORMALIZED_FACTOR_IDS)),
+                    )
+                    psycopg2.extras.execute_batch(
+                        cur,
+                        """
+                        INSERT INTO odds_lines (
+                            site_id, match_id, market_event_id, market_event_name,
+                            factor_id, odds, line_param, line_param_raw,
+                            line_param_text, is_handicap_total, snapshot_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (site_id, match_id, factor_id, line_param) DO UPDATE
+                        SET market_event_id = EXCLUDED.market_event_id,
+                            market_event_name = EXCLUDED.market_event_name,
+                            odds = EXCLUDED.odds,
+                            line_param_raw = EXCLUDED.line_param_raw,
+                            line_param_text = EXCLUDED.line_param_text,
+                            is_handicap_total = EXCLUDED.is_handicap_total,
+                            snapshot_id = EXCLUDED.snapshot_id
+                        """,
+                        odds_rows,
+                        page_size=500,
+                    )
+                    counts["odds_lines"] += len(odds_rows)
+
+        if retain_snapshot_years > 0:
+            before_year = current_utc_year() - retain_snapshot_years + 1
+            counts["snapshots_deleted"] = prune_snapshots(cur, site_id, before_year)
+        if prune_matches_before_year is not None:
+            counts["matches_deleted"] = prune_stale_matches(
+                cur, site_id, prune_matches_before_year
+            )
+
+    conn.commit()
+    return snapshot_id, counts

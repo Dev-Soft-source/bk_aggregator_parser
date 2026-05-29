@@ -20,17 +20,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "poll",
-        help="Poll Fonbet live API and import into PostgreSQL",
-        description="Poll Fonbet API and import to PostgreSQL.",
+        help="Poll bookmaker API (fonbet default, or ligastavok) — both import to PostgreSQL",
+        description="Poll bookmaker API — fonbet or ligastavok imports to PostgreSQL every ~3.5s.",
     )
     sub.add_parser(
         "adapter",
-        help="Map Fonbet packet to normalized changes (no DB)",
-        description="Fonbet adapter — map packet or stream live API.",
+        help="Map bookmaker packet to normalized changes (no DB)",
+        description="Bookmaker adapter — fonbet (default) or ligastavok.",
     )
     sub.add_parser(
         "setup",
         help="Phase 0: init schema, import test.json, verify booker_adapter",
+    )
+    sub.add_parser(
+        "fetch",
+        help="Download bookmaker snapshot JSON (ligastavok)",
+        description="Fetch HTTP snapshot — ligastavok only for now.",
     )
     return parser
 
@@ -58,7 +63,9 @@ def main(argv: list[str] | None = None) -> None:
         _run_adapter(rest)
     elif command == "setup":
         _run_setup()
-    elif command not in ("import", "poll", "adapter", "setup") and not command.startswith("-"):
+    elif command == "fetch":
+        _run_fetch(rest)
+    elif command not in ("import", "poll", "adapter", "setup", "fetch") and not command.startswith("-"):
         # Legacy: `python main.py file.json` → import
         _run_import(argv)
         return
@@ -75,17 +82,34 @@ def _run_import(argv: list[str]) -> None:
 
 
 def _run_poll(argv: list[str]) -> None:
-    sys.argv = ["poll", *argv]
-    from fonbet.poll import main as poll_main
+    if argv and argv[0] == "ligastavok":
+        sys.argv = ["poll", *argv[1:]]
+        from ligastavok.poll import main as poll_main
+    else:
+        sys.argv = ["poll", *argv]
+        from fonbet.poll import main as poll_main
 
     poll_main()
 
 
 def _run_adapter(argv: list[str]) -> None:
-    sys.argv = ["adapter", *argv]
-    from fonbet.run_adapter import main as adapter_main
+    if argv and argv[0] == "ligastavok":
+        sys.argv = ["adapter", *argv[1:]]
+        from ligastavok.run_adapter import main as adapter_main
+    else:
+        sys.argv = ["adapter", *argv]
+        from fonbet.run_adapter import main as adapter_main
 
     adapter_main()
+
+
+def _run_fetch(argv: list[str]) -> None:
+    if not argv or argv[0] != "ligastavok":
+        raise SystemExit("Usage: python main.py fetch ligastavok [--ns live|prematch] [--curl file.curl]")
+    sys.argv = ["fetch", *argv[1:]]
+    from ligastavok.fetch_snapshot import main as fetch_main
+
+    fetch_main()
 
 
 def _run_setup() -> None:

@@ -6,7 +6,7 @@ import { MatchList } from "@/components/MatchList";
 import { StatsBar } from "@/components/StatsBar";
 import type { MatchesResponse } from "@/lib/types";
 
-const POLL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 5000);
+const POLL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 3500);
 
 type PlaceFilter = "live" | "line" | "all";
 
@@ -98,9 +98,9 @@ export function Dashboard() {
           />
           {data.matches.length === 0 ? (
             <p className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
-              No matches for filter &quot;{place}&quot;. Run the backend poller:
+              No matches for filter &quot;{place}&quot;.               Run the backend poller:
               <code className="mt-2 block text-amber-400">
-                python backend/main.py poll
+                python backend/main.py poll ligastavok
               </code>
             </p>
           ) : (

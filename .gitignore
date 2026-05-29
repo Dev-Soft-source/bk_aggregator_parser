@@ -4,6 +4,7 @@ backend/adapters/__pycache__/
 backend/fontbet/__pycache__/
 backend/scripts/__pycache__/
 backend/.env
+.liga_browser_profile/
 *.py[cod]
 *$py.class
 *.so
@@ -69,3 +70,6 @@ ehthumbs.db
 .cache/
 # Accidental empty shim (do not commit)
 backend/python
+
+# Local Odds-API.io scratch output
+odds_all_sports.json
