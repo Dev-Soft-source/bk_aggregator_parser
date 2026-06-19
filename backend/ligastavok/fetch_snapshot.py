@@ -126,7 +126,7 @@ def main() -> None:
         sys.exit(f"Fetch failed: {exc}")
 
     out = Path(args.output)
-    save_snapshot(payload, out)
+    save_snapshot(payload, out, pretty=config.json_pretty)
     events = extract_events(payload)
     total = (payload.get("result") or {}).get("total")
     print(f"Saved {len(events)} events -> {out.resolve()}")

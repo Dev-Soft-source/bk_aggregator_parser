@@ -8,7 +8,7 @@ from typing import Any
 
 # All live sports, main markets — mirrors ligastavok.ru Live tab (no gameId filter).
 DEFAULT_LIVE_ALL_BODY: dict[str, Any] = {
-    "limit": 80,
+    "limit": 160,
     "skip": 0,
     "ns": "live",
     "topEvents": False,
@@ -32,7 +32,7 @@ def parse_body(raw: str | dict[str, Any] | None) -> dict[str, Any] | None:
     return parsed
 
 
-def live_all_body(*, limit: int = 80) -> dict[str, Any]:
+def live_all_body(*, limit: int = 160) -> dict[str, Any]:
     body = deepcopy(DEFAULT_LIVE_ALL_BODY)
     body["limit"] = limit
     return body

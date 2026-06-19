@@ -10,14 +10,18 @@ export async function GET(request: NextRequest) {
     const { searchParams } = request.nextUrl;
     const place = searchParams.get("place") || "live";
     const limit = Math.min(Number(searchParams.get("limit") ?? 5000), 5000);
+    const sport = searchParams.get("sport");
 
-    const { matches, stats } = await fetchLiveDashboard(
+    const { matches, sports, selectedSport, stats } = await fetchLiveDashboard(
       place === "all" ? null : place,
       limit,
+      sport,
     );
 
     const body: MatchesResponse = {
       matches,
+      sports,
+      selectedSport,
       stats,
       fetchedAt: new Date().toISOString(),
     };

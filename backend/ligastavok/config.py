@@ -9,20 +9,21 @@ load_dotenv()
 DEFAULT_WS_URL = "wss://lds-api-sites.ligastavok.ru/ws"
 DEFAULT_WS_SUBSCRIBE_METHOD = "/notifications/v3/eventUpdated"
 DEFAULT_SNAPSHOT_URL = "https://lds-api-sites.ligastavok.ru/rest/events/v8/eventsList"
-DEFAULT_POLL_INTERVAL = 3
-DEFAULT_SNAPSHOT_LIMIT = 80
+DEFAULT_POLL_INTERVAL = 3.5
+DEFAULT_SNAPSHOT_LIMIT = 160
 DEFAULT_SNAPSHOT_MAX_PAGES = 0  # 0 = fetch until API total reached
+DEFAULT_SNAPSHOT_PARALLEL_WORKERS = 6
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 )
 
 
-DEFAULT_BROWSER_URL = "https://www.ligastavok.ru/live"
+DEFAULT_BROWSER_URL = "https://www.ligastavok.ru"
 DEFAULT_BROWSER_TIMEOUT = 90.0
 DEFAULT_BROWSER_REFRESH_EVERY = 12
-DEFAULT_BROWSER_REFRESH_MIN = 15
-DEFAULT_BROWSER_REFRESH_MAX = 25
+DEFAULT_BROWSER_REFRESH_MIN = 12
+DEFAULT_BROWSER_REFRESH_MAX = 16
 
 
 def _parse_browser_refresh() -> tuple[int | None, int | None, int]:
@@ -77,6 +78,11 @@ class LigastavokApiConfig:
     browser_profile_dir: str | None
     browser_cdp_url: str | None
     browser_channel: str | None
+    snapshot_parallel_pages: bool
+    snapshot_parallel_workers: int
+    json_pretty: bool
+    profile: bool
+    ws_enabled: bool
 
     @classmethod
     def from_env(cls) -> "LigastavokApiConfig":
@@ -89,6 +95,10 @@ class LigastavokApiConfig:
         live_all_raw = os.getenv("LIGASTAVOK_LIVE_ALL_SPORTS", "true").strip().lower()
         playwright_raw = os.getenv("LIGASTAVOK_USE_PLAYWRIGHT", "false").strip().lower()
         headless_raw = os.getenv("LIGASTAVOK_BROWSER_HEADLESS", "true").strip().lower()
+        parallel_raw = os.getenv("LIGASTAVOK_SNAPSHOT_PARALLEL", "true").strip().lower()
+        json_pretty_raw = os.getenv("LIGASTAVOK_JSON_PRETTY", "false").strip().lower()
+        profile_raw = os.getenv("LIGASTAVOK_PROFILE", "false").strip().lower()
+        ws_enabled_raw = os.getenv("LIGASTAVOK_WS_ENABLED", "true").strip().lower()
         extra: dict[str, str] = {}
         raw = os.getenv("LIGASTAVOK_EXTRA_HEADERS", "").strip()
         if raw:
@@ -133,6 +143,16 @@ class LigastavokApiConfig:
             browser_profile_dir=profile_dir,
             browser_cdp_url=cdp_url,
             browser_channel=channel,
+            snapshot_parallel_pages=parallel_raw in ("1", "true", "yes", "on"),
+            snapshot_parallel_workers=int(
+                os.getenv(
+                    "LIGASTAVOK_SNAPSHOT_PARALLEL_WORKERS",
+                    str(DEFAULT_SNAPSHOT_PARALLEL_WORKERS),
+                )
+            ),
+            json_pretty=json_pretty_raw in ("1", "true", "yes", "on"),
+            profile=profile_raw in ("1", "true", "yes", "on"),
+            ws_enabled=ws_enabled_raw in ("1", "true", "yes", "on"),
         )
 
     def snapshot_query(

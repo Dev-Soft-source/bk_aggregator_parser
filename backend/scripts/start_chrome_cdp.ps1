@@ -29,7 +29,7 @@ if (-not $chrome) {
 
 if (Test-CdpUp) {
     Write-Host "OK: Chrome CDP already on port $port"
-    Write-Host "Open https://www.ligastavok.ru/live in THAT Chrome window (separate profile: liga-chrome-debug)."
+    Write-Host "Open https://www.ligastavok.ru in THAT Chrome window (separate profile: liga-chrome-debug)."
     Write-Host "Then: python main.py poll ligastavok --browser --curl capture.curl"
     exit 0
 }
@@ -41,7 +41,7 @@ $args = @(
     "--user-data-dir=$userData",
     "--no-first-run",
     "--no-default-browser-check",
-    "https://www.ligastavok.ru/live"
+    "https://www.ligastavok.ru"
 )
 
 Write-Host "Chrome: $chrome"

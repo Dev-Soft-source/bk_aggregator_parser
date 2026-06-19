@@ -12,10 +12,10 @@ from typing import Any, Iterator
 
 from adapters.base import Change, EventRef, HealthStatus, PacketSummary, SportRef, TournamentRef
 from ligastavok import mapper
-from ligastavok.api import CurlRequest, LigastavokApiError, fetch_snapshot, parse_curl_file
+from ligastavok.api import CurlRequest, LigastavokApiError, build_ws_handshake, fetch_snapshot, parse_curl_file
 from ligastavok.config import LigastavokApiConfig
 from ligastavok.patch import apply_patch
-from ligastavok.ws import LigastavokWsClient, LigastavokWsError, parse_update_message
+from ligastavok.ws import LigastavokWsError, PersistentWsSession, parse_update_message
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +44,7 @@ class LigastavokAdapter:
         self._error_count = 0
         self._cookie_refresh_after = self._roll_refresh_interval()
         self._cookie_polls_since_refresh = self._cookie_refresh_after
+        self._ws_session: PersistentWsSession | None = None
 
     def load_packet_file(self, path: Path) -> dict[str, Any]:
         with path.open(encoding="utf-8") as handle:
@@ -154,18 +155,97 @@ class LigastavokAdapter:
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
             iteration += 1
+            cycle_start = time.time()
             try:
                 packet = self.fetch_next_packet()
                 changes, summary = self.process_packet(packet)
                 yield packet, changes, summary
+
+                ws_changes = self.collect_ws_changes_until(
+                    cycle_start + self._api.poll_interval
+                )
+                if ws_changes:
+                    ws_summary = mapper.packet_summary(
+                        {
+                            "result": {
+                                "data": list(self._events_by_id.values()),
+                                "ts": self._packet_version,
+                            }
+                        }
+                    )
+                    yield packet, ws_changes, ws_summary
             except Exception as exc:
                 self._error_count += 1
                 self._last_error = str(exc)
                 logger.warning("Liga Stavok poll iteration %s failed: %s", iteration, exc)
+                remaining = cycle_start + self._api.poll_interval - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
-            time.sleep(self._api.poll_interval)
+
+    def collect_ws_changes_until(self, deadline: float) -> list[Change]:
+        """Listen for WebSocket patches until deadline (fills gap between HTTP snapshots)."""
+        remaining = deadline - time.time()
+        if remaining <= 0:
+            return []
+
+        if not self._api.ws_enabled or not self._events_by_id:
+            time.sleep(remaining)
+            return []
+
+        # Qrator blocks Python WebSocket handshakes — use the browser's live connection.
+        if self._cookie_session is not None and self._cookie_session.has_browser_ws:
+            all_changes: list[Change] = []
+            for message in self._cookie_session.collect_ws_messages(deadline):
+                event_id, ops = parse_update_message(message)
+                if event_id is None or not ops:
+                    continue
+                all_changes.extend(self.apply_ws_update(event_id, ops))
+            sleep_for = deadline - time.time()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            return all_changes
+
+        event_ids = [str(eid) for eid in self._events_by_id]
+        if self._ws_session is None:
+            self._ws_session = PersistentWsSession(self._api, self._ws_handshake)
+
+        connected = self._ws_session.ensure_connected(event_ids, force_cookies=False)
+        if not connected:
+            connected = self._ws_session.ensure_connected(event_ids, force_cookies=True)
+
+        if not connected:
+            sleep_for = deadline - time.time()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            return []
+
+        all_changes: list[Change] = []
+        try:
+            for message in self._ws_session.read_until(deadline):
+                event_id, ops = parse_update_message(message)
+                if event_id is None or not ops:
+                    continue
+                all_changes.extend(self.apply_ws_update(event_id, ops))
+        except Exception as exc:
+            logger.warning("WebSocket drain error: %s", exc)
+            self._ws_session.close()
+            self._ws_session = None
+
+        sleep_for = deadline - time.time()
+        if sleep_for > 0:
+            time.sleep(sleep_for)
+        return all_changes
+
+    def _ws_handshake(self, force_cookies: bool) -> tuple[list[str], str | None]:
+        curl_req = self._resolve_curl_request()
+        if self._cookie_session is not None:
+            curl_req.headers["Cookie"] = self._cookie_session.refresh_cookie_header(
+                force_reload=force_cookies
+            )
+        return build_ws_handshake(self._api, curl_req.headers, fresh_request_id=True)
 
     def bootstrap_from_packet(self, packet: dict[str, Any]) -> None:
         self._events_by_id = {
@@ -204,7 +284,13 @@ class LigastavokAdapter:
                 curl_req = self.load_curl_file(Path(self._api.curl_file))
             except Exception:
                 return None
-        return curl_req.headers if curl_req else None
+        if curl_req is None:
+            return None
+        if self._cookie_session is not None:
+            curl_req.headers["Cookie"] = self._cookie_session.refresh_cookie_header(
+                force_reload=False
+            )
+        return curl_req.headers
 
     def stream_live_changes(
         self,
@@ -213,6 +299,8 @@ class LigastavokAdapter:
     ) -> Iterator[tuple[dict[str, Any], list[Change], PacketSummary]]:
         if not self._events_by_id:
             raise RuntimeError("Call bootstrap_from_packet() before stream_live_changes()")
+
+        from ligastavok.ws import LigastavokWsClient
 
         client = LigastavokWsClient(self._api, extra_headers=self._ws_headers())
         event_ids = [str(eid) for eid in self._events_by_id]
@@ -240,6 +328,9 @@ class LigastavokAdapter:
             yield message, changes, summary
 
     def close(self) -> None:
+        if self._ws_session is not None:
+            self._ws_session.close()
+            self._ws_session = None
         if self._cookie_session is not None:
             self._cookie_session.close()
 

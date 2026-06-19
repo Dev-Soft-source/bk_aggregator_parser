@@ -66,7 +66,7 @@ playwright install chromium
   --user-data-dir="$env:LOCALAPPDATA\liga-chrome-debug"
 ```
 
-3. In **that** Chrome window, open [ligastavok.ru/live](https://www.ligastavok.ru/live) and wait until the live line loads (no block page).
+3. In **that** Chrome window, open [ligastavok.ru](https://www.ligastavok.ru) and wait until the live line loads (no block page).
 
 4. In `backend/.env`:
 
@@ -98,7 +98,7 @@ If you see the Qrator block page, switch to **CDP** above.
 ```env
 LIGASTAVOK_USE_PLAYWRIGHT=true
 LIGASTAVOK_BROWSER_HEADLESS=true
-LIGASTAVOK_BROWSER_URL=https://www.ligastavok.ru/live
+LIGASTAVOK_BROWSER_URL=https://www.ligastavok.ru
 ```
 
 Or pass the flag:
@@ -113,7 +113,7 @@ python main.py poll ligastavok --browser --curl capture.curl
 |----------|---------|---------|
 | `LIGASTAVOK_USE_PLAYWRIGHT` | `false` | Enable browser cookie refresh |
 | `LIGASTAVOK_BROWSER_HEADLESS` | `true` | Headless Chromium (`false` = visible window, easier to debug) |
-| `LIGASTAVOK_BROWSER_URL` | `https://www.ligastavok.ru/live` | Page that triggers `eventsList` |
+| `LIGASTAVOK_BROWSER_URL` | `https://www.ligastavok.ru` | Page that triggers `eventsList` |
 | `LIGASTAVOK_BROWSER_TIMEOUT_SECONDS` | `60` | Wait for API / Qrator challenge |
 | `LIGASTAVOK_BROWSER_REFRESH_RANGE` | `15-25` | Random refresh every N polls (N ∈ 15..25) |
 | `LIGASTAVOK_BROWSER_REFRESH_EVERY` | — | Fixed refresh every N polls (overrides range if set alone) |
@@ -278,20 +278,58 @@ python main.py fetch ligastavok --curl capture.curl --no-live-all -o ligastavok/
 | `LIGASTAVOK_SNAPSHOT_BODY` | — | POST JSON body if missing from curl |
 | `LIGASTAVOK_POLL_INTERVAL_SECONDS` | `1.5` | Poll loop interval |
 | `LIGASTAVOK_LIVE_ALL_SPORTS` | `true` | All live sports + pagination |
-| `LIGASTAVOK_SNAPSHOT_LIMIT` | `80` | Page size |
+| `LIGASTAVOK_SNAPSHOT_LIMIT` | `160` | Page size (higher = fewer HTTP calls) |
+| `LIGASTAVOK_SNAPSHOT_PARALLEL` | `true` | Fetch extra pages in parallel |
+| `LIGASTAVOK_SNAPSHOT_PARALLEL_WORKERS` | `6` | Parallel HTTP workers |
+| `LIGASTAVOK_JSON_PRETTY` | `false` | Compact JSON (much faster writes) |
+| `LIGASTAVOK_PROFILE` | `false` | Log fetch/cycle timings |
 | `LIGASTAVOK_SNAPSHOT_MAX_PAGES` | `0` | Max pages (`0` = fetch all) |
 | `LIGASTAVOK_MAIN_MARKET_TYPE` | `WIN2` | Main market filter |
 | `LIGASTAVOK_OUTCOME_KEYS` | `_1,_2` | Outcome keys to ingest |
 | `LIGASTAVOK_WS_URL` | `wss://…/ws` | WebSocket URL (adapter debug) |
 | `LIGASTAVOK_USE_PLAYWRIGHT` | `false` | Playwright cookie refresh |
 | `LIGASTAVOK_BROWSER_HEADLESS` | `true` | Headless browser |
-| `LIGASTAVOK_BROWSER_URL` | `…/live` | Page loaded for cookies |
+| `LIGASTAVOK_BROWSER_URL` | `…/` | Page loaded for cookies |
 | `LIGASTAVOK_BROWSER_TIMEOUT_SECONDS` | `60` | Browser wait timeout |
 | `LIGASTAVOK_BROWSER_REFRESH_RANGE` | `15-25` | Random N polls between refreshes |
 | `LIGASTAVOK_BROWSER_REFRESH_EVERY` | — | Fixed N polls (optional) |
 | `SITE_NAME` | `ligastavok.ru` | Bookmaker label in PostgreSQL |
 
 See `backend/.env.example` for the full list.
+
+## Performance
+
+Typical ~1s cycle breakdown:
+
+| Step | Before | After (defaults) |
+|------|--------|------------------|
+| HTTP (3× sequential pages @80) | ~900ms | ~350ms (1 page @160 or parallel) |
+| JSON write (35k lines indented) | ~300–800ms | ~50ms (compact) |
+| DB import | ~100–200ms | same |
+
+**Already enabled in defaults:**
+
+```env
+LIGASTAVOK_SNAPSHOT_LIMIT=160
+LIGASTAVOK_SNAPSHOT_PARALLEL=true
+LIGASTAVOK_SNAPSHOT_PARALLEL_WORKERS=6
+# compact JSON (default)
+LIGASTAVOK_JSON_PRETTY=false
+```
+
+**Measure timings:**
+
+```env
+LIGASTAVOK_PROFILE=true
+```
+
+Shows `fetch_snapshot: N page(s) in Xms` and `cycle: Xms` per poll.
+
+**Further tuning:**
+
+- `LIGASTAVOK_SNAPSHOT_LIMIT=200` — single HTTP call if total events &lt; 200
+- `--no-json` — skip file write if you only need DB + frontend
+- Keep CDP Chrome open — cookie read is instant (no page reload between refreshes)
 
 ## Troubleshooting
 
@@ -347,12 +385,33 @@ core/
   apply_changes.py   # Change[] → PostgreSQL (shared with future adapters)
 ```
 
-## WebSocket (debug only)
+### WebSocket 403 Forbidden
 
-1. Load HTTP snapshot → build `events_by_id`
-2. Connect WebSocket with the same cookies as HTTP
-3. `subscribe` with event ids
-4. Apply `replace` patches → re-map to `Change[]`
+Qrator **blocks Python WebSocket handshakes** even when HTTP cookies work. With `--browser` / CDP, the poller **does not open its own WebSocket** — it reads frames from Chrome's connection on `https://www.ligastavok.ru`.
+
+Fix:
+
+1. CDP Chrome on **https://www.ligastavok.ru** (line loaded).
+2. Restart poll: `python main.py poll ligastavok --browser --curl capture.curl`
+3. Look for:
+   - `Listening for browser WebSocket frames`
+   - `Browser WebSocket connected: wss://…`
+   - `(ws)` imports in poll log
+
+On first run the poller may reload the live page once so Playwright can attach (connections opened before attach are invisible).
+
+Without `--browser`, set `LIGASTAVOK_WS_ENABLED=false` — scores/timers still update via HTTP + client-side timer tick, but slower.
+
+## WebSocket (live scores & timers)
+
+The HTTP `eventsList` snapshot often repeats the same `matchTime`/score for many polls while odds change. With `--browser`, the poll loop **taps Chrome's WebSocket** for live patches between HTTP fetches.
+
+1. HTTP snapshot → bootstrap `events_by_id`
+2. WebSocket subscribe (same cookies as HTTP)
+3. JSON Patch updates → re-map to `Change[]` → PostgreSQL
+4. Frontend ticks minute clocks locally between refreshes (`timer_seconds` + `timer_updated_at`)
+
+Debug adapter-only (no DB):
 
 ```powershell
 python main.py adapter ligastavok ligastavok/ligastavok.json --live --once --max-events 10

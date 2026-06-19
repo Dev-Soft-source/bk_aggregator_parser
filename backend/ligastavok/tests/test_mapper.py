@@ -12,6 +12,8 @@ from ligastavok.mapper import (
     discover_sports,
     map_packet_to_changes,
     packet_summary,
+    _parse_match_time_minutes,
+    _score_payload,
 )
 from ligastavok.patch import apply_patch
 
@@ -103,6 +105,21 @@ class LigastavokMapperTests(unittest.TestCase):
             by_match[mid] = by_match.get(mid, 0) + n
         for match_id, count in by_match.items():
             self.assertLessEqual(count, 2, f"match {match_id} has {count} outcomes")
+
+    def test_parse_match_time_stoppage(self) -> None:
+        self.assertEqual(_parse_match_time_minutes("45+2"), 47)
+        self.assertEqual(_parse_match_time_minutes("86"), 86)
+        self.assertIsNone(_parse_match_time_minutes(None))
+
+    def test_score_payload_timer_seconds_in_elapsed_seconds(self) -> None:
+        payload = _score_payload(
+            {
+                "event": {"matchTime": "36", "status": "2h", "statusTranslated": "2-й тайм"},
+                "scores": {"total": {"ScoreTeam1": "1", "ScoreTeam2": "0"}},
+            }
+        )
+        self.assertEqual(payload["timer_seconds"], 36 * 60)
+        self.assertEqual(payload["score_function"], "2h")
 
 
 class LigastavokPatchTests(unittest.TestCase):

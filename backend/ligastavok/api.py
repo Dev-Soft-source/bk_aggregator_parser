@@ -7,11 +7,14 @@ import logging
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from ligastavok.config import LigastavokApiConfig
 from ligastavok.snapshot_body import apply_live_all, live_all_body, parse_body, serialize_body
@@ -19,10 +22,29 @@ from ligastavok.snapshot_body import apply_live_all, live_all_body, parse_body, 
 logger = logging.getLogger(__name__)
 
 _TRANSIENT_HTTP_STATUS = frozenset({429, 502, 503, 504})
+_http_session: requests.Session | None = None
 
 
 class LigastavokApiError(RuntimeError):
     pass
+
+
+def _get_http_session() -> requests.Session:
+    global _http_session
+    if _http_session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        _http_session = session
+    return _http_session
+
+
+def close_http_session() -> None:
+    global _http_session
+    if _http_session is not None:
+        _http_session.close()
+        _http_session = None
 
 
 _SKIP_CURL_HEADERS = frozenset(
@@ -203,6 +225,43 @@ def curl_has_session(headers: dict[str, str]) -> bool:
     )
 
 
+_WS_SKIP_HEADERS = frozenset(
+    {
+        "content-length",
+        "sec-fetch-dest",
+        "sec-fetch-mode",
+        "sec-fetch-site",
+        "content-type",
+        "connection",
+        "host",
+        "accept-encoding",
+        "accept",
+    }
+)
+
+
+def build_ws_handshake(
+    config: LigastavokApiConfig,
+    curl_headers: dict[str, str] | None,
+    *,
+    fresh_request_id: bool = True,
+) -> tuple[list[str], str | None]:
+    """Headers for WebSocket upgrade (strip HTTP-only keys, extract Cookie)."""
+    merged = merge_request_headers(
+        config,
+        curl_headers,
+        fresh_request_id=fresh_request_id,
+    )
+    cookie = merged.pop("Cookie", None)
+    ws_headers = {
+        key: value
+        for key, value in merged.items()
+        if key.lower() not in _WS_SKIP_HEADERS
+    }
+    header_lines = [f"{key}: {value}" for key, value in ws_headers.items()]
+    return header_lines, cookie
+
+
 def _auth_error_message(status_code: int, response_text: str) -> str | None:
     lower = response_text.lower()
     if status_code in (401, 403) and (
@@ -258,11 +317,13 @@ def fetch_page(
     body: str | None = None,
     timeout: float = 30,
     max_retries: int = 3,
+    session: requests.Session | None = None,
 ) -> dict[str, Any]:
     target = url or config.snapshot_query(
         ns=ns, game_id=game_id, limit=limit, skip=skip
     )
     last_error: Exception | None = None
+    http = session or _get_http_session()
 
     for attempt in range(max_retries):
         merged_headers = merge_request_headers(
@@ -273,14 +334,14 @@ def fetch_page(
 
         try:
             if method.upper() == "POST":
-                response = requests.post(
+                response = http.post(
                     target,
                     headers=merged_headers,
                     data=body.encode("utf-8") if body is not None else None,
                     timeout=timeout,
                 )
             else:
-                response = requests.get(target, headers=merged_headers, timeout=timeout)
+                response = http.get(target, headers=merged_headers, timeout=timeout)
         except requests.RequestException as exc:
             last_error = exc
             if attempt + 1 < max_retries:
@@ -334,7 +395,7 @@ def merge_snapshot_pages(pages: list[dict[str, Any]]) -> dict[str, Any]:
     if not pages:
         return {"id": None, "result": {"data": [], "total": 0}, "error": None, "httpCode": 200}
 
-    merged = json.loads(json.dumps(pages[0]))
+    merged = deepcopy(pages[0])
     result = merged.setdefault("result", {})
     all_data: list[dict[str, Any]] = []
     seen: set[int] = set()
@@ -355,6 +416,25 @@ def merge_snapshot_pages(pages: list[dict[str, Any]]) -> dict[str, Any]:
     merged["httpCode"] = 200
     merged["error"] = None
     return merged
+
+
+def _fetch_post_page(
+    cfg: LigastavokApiConfig,
+    *,
+    url: str,
+    headers: dict[str, str] | None,
+    body: str,
+    timeout: float,
+) -> dict[str, Any]:
+    return fetch_page(
+        cfg,
+        url=url,
+        headers=headers,
+        method="POST",
+        body=body,
+        timeout=timeout,
+        session=_get_http_session(),
+    )
 
 
 def fetch_snapshot(
@@ -382,6 +462,9 @@ def fetch_snapshot(
     if method.upper() == "POST" and url:
         post_body = resolve_post_body(cfg, body, live_all=live_all)
 
+    session = _get_http_session()
+    t0 = time.perf_counter()
+
     for page_index in range(page_limit):
         page_body = None
         if post_body is not None:
@@ -399,6 +482,7 @@ def fetch_snapshot(
                 method=method if url else "GET",
                 body=page_body if post_body is not None else body if page_index == 0 else None,
                 timeout=cfg.http_timeout,
+                session=session,
             )
         except LigastavokApiError as exc:
             if pages and post_body is not None and page_index > 0:
@@ -413,10 +497,53 @@ def fetch_snapshot(
 
         pages.append(page)
 
+        data = (page.get("result") or {}).get("data") or []
+        total = (page.get("result") or {}).get("total")
+        skip += len(data)
+
+        if (
+            cfg.snapshot_parallel_pages
+            and post_body is not None
+            and page_index == 0
+            and data
+            and total is not None
+            and skip < int(total)
+        ):
+            remaining_skips = list(range(skip, int(total), cfg.snapshot_limit))
+            max_extra = page_limit - 1
+            if cfg.snapshot_max_pages > 0:
+                max_extra = min(max_extra, cfg.snapshot_max_pages - 1)
+            if max_pages > 0:
+                max_extra = min(max_extra, max_pages - 1)
+            remaining_skips = remaining_skips[:max_extra]
+
+            if remaining_skips:
+                workers = min(cfg.snapshot_parallel_workers, len(remaining_skips))
+                logger.debug(
+                    "Parallel fetch %s page(s), workers=%s", len(remaining_skips), workers
+                )
+                with ThreadPoolExecutor(max_workers=workers) as pool:
+                    futures = {
+                        pool.submit(
+                            _fetch_post_page,
+                            cfg,
+                            url=url,
+                            headers=headers,
+                            body=serialize_body(post_body, skip=sk),
+                            timeout=cfg.http_timeout,
+                        ): sk
+                        for sk in remaining_skips
+                    }
+                    by_skip: dict[int, dict[str, Any]] = {}
+                    for fut in as_completed(futures):
+                        sk = futures[fut]
+                        by_skip[sk] = fut.result()
+                    for sk in sorted(by_skip):
+                        pages.append(by_skip[sk])
+                        skip += len((by_skip[sk].get("result") or {}).get("data") or [])
+            break
+
         if post_body is None:
-            data = (page.get("result") or {}).get("data") or []
-            total = (page.get("result") or {}).get("total")
-            skip += len(data)
             if not data:
                 break
             if total is not None and skip >= int(total):
@@ -424,9 +551,6 @@ def fetch_snapshot(
             url = None
             continue
 
-        data = (page.get("result") or {}).get("data") or []
-        total = (page.get("result") or {}).get("total")
-        skip += len(data)
         if not data:
             break
         if total is not None and skip >= int(total):
@@ -436,11 +560,23 @@ def fetch_snapshot(
         if cfg.snapshot_max_pages > 0 and page_index + 1 >= cfg.snapshot_max_pages:
             break
 
+    if cfg.profile:
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        logger.info(
+            "fetch_snapshot: %s page(s) in %.0fms", len(pages), elapsed_ms
+        )
+
     return merge_snapshot_pages(pages)
 
 
-def save_snapshot(payload: dict[str, Any], path: Path) -> None:
-    path.write_text(
-        json.dumps(payload, indent=4, ensure_ascii=False) + "\n",
-        encoding="utf-8",
-    )
+def save_snapshot(
+    payload: dict[str, Any],
+    path: Path,
+    *,
+    pretty: bool = False,
+) -> None:
+    if pretty:
+        text = json.dumps(payload, indent=4, ensure_ascii=False) + "\n"
+    else:
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n"
+    path.write_text(text, encoding="utf-8")

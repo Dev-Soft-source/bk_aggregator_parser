@@ -1,3 +1,9 @@
+export interface SportCategory {
+  sportName: string;
+  label: string;
+  matchCount: number;
+}
+
 export interface OddsLine {
   factorId: number;
   odds: number;
@@ -20,6 +26,8 @@ export interface LiveMatch {
   score1: number | null;
   score2: number | null;
   timerDisplay: string | null;
+  timerSeconds: number | null;
+  scoreUpdatedAt: string | null;
   scoreFunction: string | null;
   bettingState: string | null;
   odd1: number | null;
@@ -36,6 +44,8 @@ export interface DashboardStats {
 
 export interface MatchesResponse {
   matches: LiveMatch[];
+  sports: SportCategory[];
+  selectedSport: string | null;
   stats: DashboardStats;
   fetchedAt: string;
 }

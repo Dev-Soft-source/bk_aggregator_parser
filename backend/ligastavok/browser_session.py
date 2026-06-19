@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import queue
 import subprocess
 import sys
 import time
@@ -50,7 +52,7 @@ Use your normal Chrome instead of Playwright-launched Chromium:
      --remote-debugging-port=9222 `
      --user-data-dir="$env:LOCALAPPDATA\\liga-chrome-debug"
 
-3. In that Chrome, open https://www.ligastavok.ru/live and wait until the line loads.
+3. In that Chrome, open https://www.ligastavok.ru and wait until the line loads.
 4. In backend/.env set:
 
    LIGASTAVOK_BROWSER_CDP_URL=http://127.0.0.1:9222
@@ -148,6 +150,10 @@ class PlaywrightCookieSession:
         self._refresh_count = 0
         self._last_header = ""
         self._cdp_mode = bool(config.browser_cdp_url)
+        self._ws_queue: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=1000)
+        self._ws_listener_registered = False
+        self._browser_ws_urls: set[str] = set()
+        self._ws_bootstrap_attempted = False
 
     def start(self) -> None:
         if self._started:
@@ -244,6 +250,81 @@ class PlaywrightCookieSession:
         self._started = True
         mode = "cdp" if self._cdp_mode else "launch"
         logger.info("Browser session ready (mode=%s, url=%s)", mode, self._config.browser_url)
+        self.ensure_ws_listener()
+
+    @property
+    def has_browser_ws(self) -> bool:
+        return self._page is not None
+
+    def ensure_ws_listener(self) -> None:
+        """Tap WebSocket frames from the real browser (Qrator-safe)."""
+        if self._ws_listener_registered or self._page is None:
+            return
+        self._page.on("websocket", self._on_page_websocket)
+        self._ws_listener_registered = True
+        logger.info("Listening for browser WebSocket frames")
+
+    def _on_page_websocket(self, ws: Any) -> None:
+        url = str(ws.url or "")
+        if "ligastavok" not in url.lower() and "/ws" not in url:
+            return
+        self._browser_ws_urls.add(url)
+        if len(self._browser_ws_urls) == 1:
+            logger.info("Browser WebSocket connected: %s", url)
+
+        def on_frame(payload: str | bytes) -> None:
+            try:
+                text = payload if isinstance(payload, str) else payload.decode("utf-8")
+                message = json.loads(text)
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                return
+            if not isinstance(message, dict):
+                return
+            try:
+                self._ws_queue.put_nowait(message)
+            except queue.Full:
+                pass
+
+        ws.on("framereceived", on_frame)
+
+    def ensure_browser_ws_active(self) -> None:
+        """Reload live page once so Playwright can attach to a new WebSocket."""
+        self.ensure_ws_listener()
+        if self._browser_ws_urls or self._ws_bootstrap_attempted:
+            return
+        if not self._cdp_mode or self._page is None:
+            return
+        self._ws_bootstrap_attempted = True
+        logger.info(
+            "No browser WebSocket yet — reloading %s so score/timer patches can flow",
+            self._config.browser_url,
+        )
+        try:
+            self._load_live_page(force_reload=True)
+        except Exception as exc:
+            logger.warning("Live page reload for WebSocket bootstrap failed: %s", exc)
+
+    def collect_ws_messages(self, deadline: float) -> list[dict[str, Any]]:
+        """Drain JSON messages from browser WebSockets until deadline."""
+        self.ensure_browser_ws_active()
+        messages: list[dict[str, Any]] = []
+        while time.time() < deadline:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                messages.append(self._ws_queue.get(timeout=min(0.25, remaining)))
+            except queue.Empty:
+                continue
+        return messages
+
+    def _navigate_live(self, page: Any, url: str, timeout_ms: int) -> None:
+        current = (page.url or "").split("?", 1)[0].rstrip("/")
+        target = url.split("?", 1)[0].rstrip("/")
+        if current == target:
+            page.reload(wait_until="domcontentloaded", timeout=timeout_ms)
+        else:
+            page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
 
     def _raise_if_blocked(self) -> None:
         page = self._page
@@ -295,15 +376,12 @@ class PlaywrightCookieSession:
             return "eventsList" in response.url and response.status == 200
 
         urls = [self._config.browser_url]
-        if not self._config.browser_url.rstrip("/").endswith("/live"):
-            urls.append("https://www.ligastavok.ru/live")
 
         last_exc: Exception | None = None
         for url in urls:
             try:
-                action = page.goto if self._refresh_count == 0 else page.reload
                 with page.expect_response(_is_events_list, timeout=min(timeout_ms, 25_000)):
-                    action(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                    self._navigate_live(page, url, timeout_ms)
                 self._raise_if_blocked()
                 return
             except LigastavokApiError:

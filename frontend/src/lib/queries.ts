@@ -1,5 +1,25 @@
 import { getPool, siteName } from "./db";
-import type { DashboardStats, LiveMatch, OddsLine } from "./types";
+import {
+  pickDefaultSportName,
+  sortSportNames,
+  sportDisplayLabel,
+} from "./sports";
+import type { DashboardStats, LiveMatch, OddsLine, SportCategory } from "./types";
+
+const SPORT_NAME_SQL = `CASE WHEN sp.reference_sport_id = 1 THEN 'Football' ELSE sp.name_en END`;
+
+const SPORTS_SQL = `
+SELECT
+    ${SPORT_NAME_SQL} AS sport_name,
+    COUNT(*)::int AS match_count
+FROM matches m
+JOIN sites st ON st.id = m.site_id
+JOIN sports sp ON sp.site_id = m.site_id AND sp.id = m.sport_id
+WHERE st.name = $1
+  AND ($2::text IS NULL OR m.place = $2)
+GROUP BY 1
+ORDER BY match_count DESC, sport_name ASC
+`;
 
 const MATCHES_SQL = `
 SELECT
@@ -9,12 +29,14 @@ SELECT
     m.place,
     m.start_time,
     m.priority,
-    CASE WHEN sp.reference_sport_id = 1 THEN 'Football' ELSE sp.name_en END AS sport_name,
+    ${SPORT_NAME_SQL} AS sport_name,
     l.name AS league_name,
     c.name AS country_name,
     ms.score1,
     ms.score2,
     ms.timer_display,
+    ms.timer_seconds,
+    ms.timer_updated_at AS score_updated_at,
     ms.score_function,
     bs.state AS betting_state,
     snap.imported_at AS last_updated
@@ -28,8 +50,8 @@ LEFT JOIN betting_status bs ON bs.site_id = m.site_id AND bs.match_id = m.id
 LEFT JOIN import_snapshots snap ON snap.id = m.snapshot_id
 WHERE st.name = $1
   AND ($2::text IS NULL OR m.place = $2)
+  AND ($4::text IS NULL OR ${SPORT_NAME_SQL} = $4)
 ORDER BY
-    CASE WHEN sp.reference_sport_id = 1 THEN 'Football' ELSE sp.name_en END ASC,
     c.name ASC NULLS LAST,
     l.name ASC NULLS LAST,
     m.priority DESC NULLS LAST,
@@ -108,6 +130,10 @@ function mapMatch(
     score1: row.score1 != null ? Number(row.score1) : null,
     score2: row.score2 != null ? Number(row.score2) : null,
     timerDisplay: row.timer_display as string | null,
+    timerSeconds: row.timer_seconds != null ? Number(row.timer_seconds) : null,
+    scoreUpdatedAt: row.score_updated_at
+      ? new Date(row.score_updated_at as string).toISOString()
+      : null,
     scoreFunction: row.score_function as string | null,
     bettingState: row.betting_state as string | null,
     odd1: mainOdds[0]?.odds ?? null,
@@ -133,12 +159,35 @@ function mapOdds(row: Record<string, unknown>): OddsLine {
 export async function fetchLiveDashboard(
   place: string | null = "live",
   limit = 80,
-): Promise<{ matches: LiveMatch[]; stats: DashboardStats }> {
+  sportName: string | null = null,
+): Promise<{
+  matches: LiveMatch[];
+  sports: SportCategory[];
+  selectedSport: string | null;
+  stats: DashboardStats;
+}> {
   const pool = getPool();
   const site = siteName();
 
+  const sportsResult = await pool.query(SPORTS_SQL, [site, place]);
+  const sports: SportCategory[] = sortSportNames(
+    sportsResult.rows.map((row) => String(row.sport_name)),
+  ).map((name) => {
+    const row = sportsResult.rows.find((r) => String(r.sport_name) === name);
+    return {
+      sportName: name,
+      label: sportDisplayLabel(name),
+      matchCount: row ? Number(row.match_count) : 0,
+    };
+  });
+
+  const selectedSport =
+    sportName && sports.some((s) => s.sportName === sportName)
+      ? sportName
+      : pickDefaultSportName(sports.map((s) => s.sportName));
+
   const [matchesResult, statsResult] = await Promise.all([
-    pool.query(MATCHES_SQL, [site, place, limit]),
+    pool.query(MATCHES_SQL, [site, place, limit, selectedSport]),
     pool.query(STATS_SQL, [site]),
   ]);
 
@@ -178,5 +227,5 @@ export async function fetchLiveDashboard(
     return mapMatch(row, sorted);
   });
 
-  return { matches, stats };
+  return { matches, sports, selectedSport, stats };
 }

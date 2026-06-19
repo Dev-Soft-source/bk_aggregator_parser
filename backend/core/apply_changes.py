@@ -188,15 +188,23 @@ def apply_changes(
                     """
                     INSERT INTO match_scores (
                         site_id, match_id, score1, score2, timer_seconds,
-                        timer_display, raw_scores, snapshot_id
+                        timer_display, score_function, raw_scores,
+                        timer_updated_at, snapshot_id
                     )
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
                     ON CONFLICT (site_id, match_id) DO UPDATE
                     SET score1 = EXCLUDED.score1,
                         score2 = EXCLUDED.score2,
                         timer_seconds = EXCLUDED.timer_seconds,
                         timer_display = EXCLUDED.timer_display,
+                        score_function = EXCLUDED.score_function,
                         raw_scores = EXCLUDED.raw_scores,
+                        timer_updated_at = CASE
+                            WHEN EXCLUDED.timer_seconds IS NOT NULL
+                              OR EXCLUDED.timer_display IS NOT NULL
+                            THEN NOW()
+                            ELSE match_scores.timer_updated_at
+                        END,
                         snapshot_id = EXCLUDED.snapshot_id
                     """,
                     (
@@ -206,6 +214,7 @@ def apply_changes(
                         sp.get("score2"),
                         sp.get("timer_seconds"),
                         sp.get("timer_display"),
+                        sp.get("score_function"),
                         psycopg2.extras.Json(sp.get("raw_scores"))
                         if sp.get("raw_scores")
                         else None,

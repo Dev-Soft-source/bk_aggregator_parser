@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from collections import Counter
 from dataclasses import replace
 from pathlib import Path
@@ -80,7 +81,12 @@ def run_poll(
         elif api_config.curl_file:
             print(f"  curl: {api_config.curl_file}")
         if output_path is not None:
-            print(f"  json backup: {output_path.resolve()}")
+            print(f"  json output: {output_path.resolve()} (compact={not api_config.json_pretty})")
+        if api_config.snapshot_parallel_pages:
+            print(
+                f"  http: parallel pages, limit={api_config.snapshot_limit}, "
+                f"workers={api_config.snapshot_parallel_workers}"
+            )
 
         iteration = 0
         with connect(db_config) as conn:
@@ -88,6 +94,15 @@ def run_poll(
                 max_iterations=max_iterations
             ):
                 iteration += 1
+                t0 = time.perf_counter() if api_config.profile else 0.0
+
+                if output_path is not None:
+                    save_snapshot(packet, output_path, pretty=api_config.json_pretty)
+                    events = extract_events(packet)
+                    print(
+                        f"[{iteration}] wrote {len(events)} events -> {output_path.resolve()}"
+                    )
+
                 try:
                     snapshot_id, counts = apply_changes(
                         conn,
@@ -99,20 +114,18 @@ def run_poll(
                     )
                 except Exception as exc:
                     logger.warning("DB import iteration %s failed: %s", iteration, exc)
+                    _print_summary(iteration, summary, changes, None)
                     continue
 
-                if output_path is not None:
-                    save_snapshot(packet, output_path)
-                    events = extract_events(packet)
-                    print(
-                        f"[{iteration}] json backup {len(events)} events -> {output_path.resolve()}"
-                    )
-
                 _print_summary(iteration, summary, changes, counts)
+                label = "ws" if any(c.from_version is not None for c in changes) else "http"
                 print(
-                    f"  imported snapshot_id={snapshot_id} "
-                    f"matches={counts['matches']} odds={counts['odds_lines']}"
+                    f"  imported ({label}) snapshot_id={snapshot_id} "
+                    f"matches={counts['matches']} scores={counts['scores_updated']} "
+                    f"odds={counts['odds_lines']}"
                 )
+                if api_config.profile:
+                    print(f"  cycle: {(time.perf_counter() - t0) * 1000:.0f}ms")
 
                 if show_samples and iteration == 1:
                     for change_type in ChangeType:
@@ -134,6 +147,9 @@ def run_poll(
         )
     finally:
         adapter.close()
+        from ligastavok.api import close_http_session
+
+        close_http_session()
 
 
 def main() -> None:

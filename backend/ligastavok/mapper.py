@@ -162,11 +162,30 @@ def _betting_state(item: dict[str, Any]) -> str:
     return "unblocked"
 
 
+def _parse_match_time_minutes(match_time: Any) -> int | None:
+    """Parse event.matchTime (minutes, optionally with stoppage e.g. 45+2)."""
+    if match_time is None:
+        return None
+    text = str(match_time).strip().rstrip("'")
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    if "+" in text:
+        base, extra = text.split("+", 1)
+        try:
+            return int(base) + int(extra)
+        except ValueError:
+            return None
+    return None
+
+
 def _score_payload(item: dict[str, Any]) -> dict[str, Any]:
     event = _event_block(item)
     scores = item.get("scores") or {}
     total = scores.get("total") or {}
     current = scores.get("current") or {}
+    status = event.get("status")
 
     def _parse_score(block: dict[str, Any]) -> tuple[int | None, int | None]:
         if not block:
@@ -182,16 +201,19 @@ def _score_payload(item: dict[str, Any]) -> dict[str, Any]:
         score1, score2 = _parse_score(current)
 
     match_time = event.get("matchTime")
-    timer_display = event.get("statusTranslated") or event.get("status")
+    timer_display = event.get("statusTranslated") or status
+    match_minutes = _parse_match_time_minutes(match_time)
     if match_time is not None:
         timer_display = f"{match_time}'"
+    timer_seconds = match_minutes * 60 if match_minutes is not None else None
 
     return {
         "score1": score1,
         "score2": score2,
         "timer_display": timer_display,
-        "timer_seconds": int(match_time) if str(match_time).isdigit() else None,
-        "status": event.get("status"),
+        "timer_seconds": timer_seconds,
+        "score_function": str(status) if status is not None else None,
+        "status": status,
         "status_translated": event.get("statusTranslated"),
         "raw_scores": scores,
     }

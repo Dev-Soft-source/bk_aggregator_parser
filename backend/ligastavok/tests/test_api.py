@@ -45,6 +45,28 @@ class ParseCurlTests(unittest.TestCase):
         self.assertEqual(req.headers["Cookie"], "session=abc; qrator=xyz")
         self.assertEqual(req.body, '{"ns":"live","limit":20}')
 
+    def test_build_ws_handshake_strips_http_only_headers(self) -> None:
+        from ligastavok.api import build_ws_handshake
+        from ligastavok.config import LigastavokApiConfig
+
+        cfg = LigastavokApiConfig.from_env()
+        lines, cookie = build_ws_handshake(
+            cfg,
+            {
+                "Cookie": "qrator_jsid2=abc",
+                "User-Agent": "TestAgent",
+                "Sec-Fetch-Mode": "cors",
+                "content-type": "application/json",
+                "x-application-name": "mobile",
+            },
+        )
+        joined = "\n".join(lines)
+        self.assertEqual(cookie, "qrator_jsid2=abc")
+        self.assertIn("User-Agent: TestAgent", joined)
+        self.assertIn("x-application-name: mobile", joined)
+        self.assertNotIn("Sec-Fetch", joined)
+        self.assertNotIn("content-type", joined.lower())
+
     def test_parse_windows_cmd_curl(self) -> None:
         curl = r'''curl ^"https://lds-api-sites.ligastavok.ru/rest/events/v8/eventsList^" ^
   -H ^"Referer: https://www.ligastavok.ru/^" ^

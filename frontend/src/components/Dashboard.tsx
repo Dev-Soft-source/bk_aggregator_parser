@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { MatchList } from "@/components/MatchList";
 import { StatsBar } from "@/components/StatsBar";
+import { DEFAULT_SPORT_LABEL } from "@/lib/sports";
 import type { MatchesResponse } from "@/lib/types";
 
 const POLL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 3500);
@@ -15,13 +16,16 @@ export function Dashboard() {
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [place, setPlace] = useState<PlaceFilter>("live");
+  const [userSport, setUserSport] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setIsRefreshing(true);
     try {
-      const res = await fetch(`/api/matches?place=${place}`, {
-        cache: "no-store",
-      });
+      const params = new URLSearchParams({ place });
+      if (userSport) {
+        params.set("sport", userSport);
+      }
+      const res = await fetch(`/api/matches?${params}`, { cache: "no-store" });
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
         throw new Error(body.error ?? `HTTP ${res.status}`);
@@ -34,13 +38,18 @@ export function Dashboard() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [place]);
+  }, [place, userSport]);
 
   useEffect(() => {
     load();
     const id = setInterval(load, POLL_MS);
     return () => clearInterval(id);
   }, [load]);
+
+  const activeSport = userSport ?? data?.selectedSport ?? null;
+  const activeLabel =
+    data?.sports.find((s) => s.sportName === activeSport)?.label ??
+    DEFAULT_SPORT_LABEL;
 
   return (
     <div className="space-y-6">
@@ -50,7 +59,7 @@ export function Dashboard() {
             Live sportsbook
           </h1>
           <p className="text-sm text-slate-400">
-            Auto-refresh every {POLL_MS / 1000}s from PostgreSQL
+            {activeLabel} · auto-refresh every {POLL_MS / 1000}s
           </p>
         </div>
         <div className="flex gap-2">
@@ -90,23 +99,68 @@ export function Dashboard() {
       ) : null}
 
       {data ? (
-        <>
-          <StatsBar
-            stats={data.stats}
-            fetchedAt={data.fetchedAt}
-            isRefreshing={isRefreshing}
-          />
-          {data.matches.length === 0 ? (
-            <p className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
-              No matches for filter &quot;{place}&quot;.               Run the backend poller:
-              <code className="mt-2 block text-amber-400">
-                python backend/main.py poll ligastavok
-              </code>
-            </p>
-          ) : (
-            <MatchList matches={data.matches} />
-          )}
-        </>
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-start">
+          <aside className="w-full shrink-0 lg:w-52">
+            <nav
+              className="overflow-hidden rounded-xl border border-slate-800 bg-slate-900/50"
+              aria-label="Sports"
+            >
+              <div className="border-b border-slate-800 px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-slate-500">
+                Sports
+              </div>
+              <ul className="max-h-[420px] overflow-y-auto p-2">
+                {data.sports.length === 0 ? (
+                  <li className="px-3 py-2 text-sm text-slate-500">No sports</li>
+                ) : (
+                  data.sports.map((sport) => {
+                    const isActive = sport.sportName === activeSport;
+                    return (
+                      <li key={sport.sportName}>
+                        <button
+                          type="button"
+                          onClick={() => setUserSport(sport.sportName)}
+                          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left text-sm transition ${
+                            isActive
+                              ? "bg-amber-500/15 font-medium text-amber-400"
+                              : "text-slate-300 hover:bg-slate-800"
+                          }`}
+                        >
+                          <span>{sport.label}</span>
+                          <span
+                            className={`tabular-nums text-xs ${
+                              isActive ? "text-amber-500/80" : "text-slate-500"
+                            }`}
+                          >
+                            {sport.matchCount}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })
+                )}
+              </ul>
+            </nav>
+          </aside>
+
+          <div className="min-w-0 flex-1 space-y-6">
+            <StatsBar
+              stats={data.stats}
+              fetchedAt={data.fetchedAt}
+              isRefreshing={isRefreshing}
+            />
+            {data.matches.length === 0 ? (
+              <p className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
+                No {activeLabel} matches for &quot;{place}&quot;. Run the backend
+                poller:
+                <code className="mt-2 block text-amber-400">
+                  python backend/main.py poll ligastavok
+                </code>
+              </p>
+            ) : (
+              <MatchList matches={data.matches} singleSport />
+            )}
+          </div>
+        </div>
       ) : !error ? (
         <p className="text-center text-slate-400">Loading…</p>
       ) : null}

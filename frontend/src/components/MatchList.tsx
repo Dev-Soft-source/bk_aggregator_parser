@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
+import { formatLiveTimer } from "@/lib/liveTimer";
 import type { LiveMatch } from "@/lib/types";
 interface MatchListProps {
   matches: LiveMatch[];
+  singleSport?: boolean;
 }
 
 const stateStyles: Record<string, string> = {
@@ -13,10 +15,12 @@ const stateStyles: Record<string, string> = {
   partial: "text-amber-400",
 };
 
-function sortMatches(matches: LiveMatch[]) {
+function sortMatches(matches: LiveMatch[], singleSport: boolean) {
   return [...matches].sort((a, b) => {
-    const bySport = a.sportName.localeCompare(b.sportName);
-    if (bySport !== 0) return bySport;
+    if (!singleSport) {
+      const bySport = a.sportName.localeCompare(b.sportName);
+      if (bySport !== 0) return bySport;
+    }
 
     const byCountry = (a.countryName ?? "").localeCompare(b.countryName ?? "");
     if (byCountry !== 0) return byCountry;
@@ -40,21 +44,29 @@ function formatOdd(value: number | null) {
 }
 
 type OddsSnapshot = { odd1: number | null; odd2: number | null };
+type OddHighlight = "up" | "down" | null;
+type MatchHighlight = { odd1: OddHighlight; odd2: OddHighlight };
 
-function oddChangeClass(
-  current: number | null,
-  previous: number | null | undefined,
-): string {
-  if (current == null || previous == null) {
-    return "text-slate-200";
-  }
-  if (current > previous) {
+function oddHighlightClass(direction: OddHighlight): string {
+  if (direction === "up") {
     return "bg-emerald-600/45 text-emerald-100";
   }
-  if (current < previous) {
+  if (direction === "down") {
     return "bg-rose-600/45 text-rose-100";
   }
   return "text-slate-200";
+}
+
+function computeHighlight(
+  current: number | null,
+  previous: number | null | undefined,
+): OddHighlight {
+  if (current == null || previous == null) {
+    return null;
+  }
+  if (current > previous) return "up";
+  if (current < previous) return "down";
+  return null;
 }
 
 function formatStartTime(iso: string | null) {
@@ -67,31 +79,50 @@ function formatStartTime(iso: string | null) {
   });
 }
 
-export function MatchList({ matches }: MatchListProps) {
-  const previousOddsRef = useRef<Map<number, OddsSnapshot>>(new Map());
+export function MatchList({ matches, singleSport = false }: MatchListProps) {
+  const baselineOddsRef = useRef<Map<number, OddsSnapshot>>(new Map());
+  const [, tick] = useState(0);
 
-  useEffect(() => {
-    const next = new Map<number, OddsSnapshot>();
+  const oddHighlights = useMemo(() => {
+    const next = new Map<number, MatchHighlight>();
     for (const match of matches) {
-      next.set(match.matchId, { odd1: match.odd1, odd2: match.odd2 });
+      const base = baselineOddsRef.current.get(match.matchId);
+      next.set(match.matchId, {
+        odd1: computeHighlight(match.odd1, base?.odd1),
+        odd2: computeHighlight(match.odd2, base?.odd2),
+      });
     }
-    previousOddsRef.current = next;
+    return next;
   }, [matches]);
 
-  const sorted = sortMatches(matches);
+  useEffect(() => {
+    const nextBaseline = new Map<number, OddsSnapshot>();
+    for (const match of matches) {
+      nextBaseline.set(match.matchId, { odd1: match.odd1, odd2: match.odd2 });
+    }
+    baselineOddsRef.current = nextBaseline;
+  }, [matches]);
+
+  useEffect(() => {
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const sorted = sortMatches(matches, singleSport);
   let lastSport = "";
   let lastCountry = "";
 
   const rows: ReactNode[] = [];
+  const colSpan = singleSport ? 10 : 12;
 
   for (const match of sorted) {
     const countryKey = match.countryName ?? "—";
 
-    if (match.sportName !== lastSport) {
+    if (!singleSport && match.sportName !== lastSport) {
       rows.push(
         <tr key={`sport-${match.sportName}`} className="bg-slate-800/60">
           <td
-            colSpan={12}
+            colSpan={colSpan}
             className="px-4 py-2 text-sm font-semibold uppercase tracking-wide text-amber-400"
           >
             {match.sportName}
@@ -105,9 +136,9 @@ export function MatchList({ matches }: MatchListProps) {
     if (countryKey !== lastCountry) {
       rows.push(
         <tr key={`country-${match.sportName}-${countryKey}`} className="bg-slate-800/30">
-          <td className="px-4 py-1.5" />
+          {!singleSport ? <td className="px-4 py-1.5" /> : null}
           <td
-            colSpan={11}
+            colSpan={singleSport ? colSpan : colSpan - 1}
             className="px-4 py-1.5 text-xs font-medium text-slate-300"
           >
             {countryKey}
@@ -119,14 +150,18 @@ export function MatchList({ matches }: MatchListProps) {
 
     const state = match.bettingState ?? "—";
     const stateClass = stateStyles[state] ?? "text-slate-400";
-    const prev = previousOddsRef.current.get(match.matchId);
-    const odd1Class = oddChangeClass(match.odd1, prev?.odd1);
-    const odd2Class = oddChangeClass(match.odd2, prev?.odd2);
+    const highlight = oddHighlights.get(match.matchId);
+    const odd1Class = oddHighlightClass(highlight?.odd1 ?? null);
+    const odd2Class = oddHighlightClass(highlight?.odd2 ?? null);
 
     rows.push(
       <tr key={match.matchId} className="transition hover:bg-slate-800/40">
-        <td className="px-4 py-3 text-slate-600">·</td>
-        <td className="px-4 py-3 text-slate-600">·</td>
+        {!singleSport ? (
+          <>
+            <td className="px-4 py-3 text-slate-600">·</td>
+            <td className="px-4 py-3 text-slate-600">·</td>
+          </>
+        ) : null}
         <td
           className="max-w-[200px] truncate px-4 py-3 text-slate-400"
           title={match.leagueName ?? undefined}
@@ -143,7 +178,7 @@ export function MatchList({ matches }: MatchListProps) {
           {match.team2 ?? "—"}
         </td>
         <td className="whitespace-nowrap px-4 py-3 text-center text-slate-300">
-          {match.timerDisplay ?? "—"}
+          {formatLiveTimer(match)}
         </td>
         <td className="whitespace-nowrap px-4 py-3">
           <span className="rounded bg-slate-800 px-2 py-0.5 text-xs uppercase text-slate-300">
@@ -156,12 +191,12 @@ export function MatchList({ matches }: MatchListProps) {
           {state}
         </td>
         <td
-          className={`whitespace-nowrap px-4 py-3 text-center tabular-nums transition-colors duration-300 ${odd1Class}`}
+          className={`whitespace-nowrap px-4 py-3 text-center tabular-nums ${odd1Class}`}
         >
           {formatOdd(match.odd1)}
         </td>
         <td
-          className={`whitespace-nowrap px-4 py-3 text-center tabular-nums transition-colors duration-300 ${odd2Class}`}
+          className={`whitespace-nowrap px-4 py-3 text-center tabular-nums ${odd2Class}`}
         >
           {formatOdd(match.odd2)}
         </td>
@@ -178,15 +213,20 @@ export function MatchList({ matches }: MatchListProps) {
         <table className="w-full min-w-[960px] border-collapse text-left text-sm">
           <thead>
             <tr className="border-b border-slate-800 bg-slate-900 text-xs font-medium uppercase tracking-wide text-slate-400">
-              <th className="px-4 py-3">Sport</th>
-              <th className="px-4 py-3">Country</th>
+              {!singleSport ? (
+                <>
+                  <th className="px-4 py-3">Sport</th>
+                  <th className="px-4 py-3">Country</th>
+                </>
+              ) : (
+                <th className="px-4 py-3">Country</th>
+              )}
               <th className="px-4 py-3">League</th>
               <th className="px-4 py-3 text-right">Team 1</th>
               <th className="px-4 py-3 text-center">Score</th>
               <th className="px-4 py-3">Team 2</th>
               <th className="px-4 py-3 text-center">Timer</th>
               <th className="px-4 py-3">Place</th>
-              <th className="px-4 py-3">Status</th>
               <th className="px-4 py-3 text-center">1</th>
               <th className="px-4 py-3 text-center">2</th>
               <th className="px-4 py-3">Start</th>
@@ -196,8 +236,8 @@ export function MatchList({ matches }: MatchListProps) {
         </table>
       </div>
       <div className="border-t border-slate-800 px-4 py-2 text-xs text-slate-500">
-        {sorted.length} match{sorted.length === 1 ? "" : "es"} · sorted by sport,
-        country, league
+        {sorted.length} match{sorted.length === 1 ? "" : "es"}
+        {singleSport ? " · by country, league" : " · sorted by sport, country, league"}
       </div>
     </div>
   );
