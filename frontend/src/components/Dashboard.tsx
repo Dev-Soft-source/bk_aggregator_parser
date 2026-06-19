@@ -150,10 +150,21 @@ export function Dashboard() {
             />
             {data.matches.length === 0 ? (
               <p className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
-                No {activeLabel} matches for &quot;{place}&quot;. Run the backend
-                poller:
+                No {activeLabel} matches for &quot;{place}&quot;.
+                {data.siteName ? (
+                  <>
+                    {" "}
+                    Site: <span className="text-slate-300">{data.siteName}</span>.
+                    Ensure{" "}
+                    <code className="text-amber-400/90">frontend/.env.local</code>{" "}
+                    <code className="text-amber-400/90">SITE_NAME</code> matches{" "}
+                    <code className="text-amber-400/90">backend/.env</code>, then run:
+                  </>
+                ) : (
+                  " Run the backend poller:"
+                )}
                 <code className="mt-2 block text-amber-400">
-                  python backend/main.py poll ligastavok
+                  cd backend && {data.pollCommand ?? "python main.py poll"}
                 </code>
               </p>
             ) : (

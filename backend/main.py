@@ -21,7 +21,7 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "poll",
         help="Poll bookmaker API (fonbet default, or ligastavok) — both import to PostgreSQL",
-        description="Poll bookmaker API — fonbet or ligastavok imports to PostgreSQL every ~3.5s.",
+        description="Poll bookmaker API — fonbet, ligastavok, or bet365 imports to PostgreSQL every ~3.5s.",
     )
     sub.add_parser(
         "adapter",
@@ -36,6 +36,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "fetch",
         help="Download bookmaker snapshot JSON (ligastavok)",
         description="Fetch HTTP snapshot — ligastavok only for now.",
+    )
+    sub.add_parser(
+        "listen",
+        help="Listen to bookmaker WebSocket (bet365 ZAP)",
+        description="Stream WebSocket frames — bet365 ZAP protocol.",
+    )
+    sub.add_parser(
+        "capture",
+        help="Capture session from browser (bet365 uid + cookie)",
+        description="CDP Chrome capture — bet365 ZAP uid and pstk.",
     )
     return parser
 
@@ -65,7 +75,11 @@ def main(argv: list[str] | None = None) -> None:
         _run_setup()
     elif command == "fetch":
         _run_fetch(rest)
-    elif command not in ("import", "poll", "adapter", "setup", "fetch") and not command.startswith("-"):
+    elif command == "listen":
+        _run_listen(rest)
+    elif command == "capture":
+        _run_capture(rest)
+    elif command not in ("import", "poll", "adapter", "setup", "fetch", "listen", "capture") and not command.startswith("-"):
         # Legacy: `python main.py file.json` → import
         _run_import(argv)
         return
@@ -85,6 +99,9 @@ def _run_poll(argv: list[str]) -> None:
     if argv and argv[0] == "ligastavok":
         sys.argv = ["poll", *argv[1:]]
         from ligastavok.poll import main as poll_main
+    elif argv and argv[0] == "bet365":
+        sys.argv = ["poll", *argv[1:]]
+        from bet365.poll import main as poll_main
     else:
         sys.argv = ["poll", *argv]
         from fonbet.poll import main as poll_main
@@ -110,6 +127,26 @@ def _run_fetch(argv: list[str]) -> None:
     from ligastavok.fetch_snapshot import main as fetch_main
 
     fetch_main()
+
+
+def _run_capture(argv: list[str]) -> None:
+    if not argv or argv[0] != "bet365":
+        raise SystemExit("Usage: python main.py capture bet365 [--env]")
+    sys.argv = ["capture", *argv[1:]]
+    from bet365.capture_session import main as capture_main
+
+    capture_main()
+
+
+def _run_listen(argv: list[str]) -> None:
+    if not argv or argv[0] != "bet365":
+        raise SystemExit(
+            "Usage: python main.py listen bet365 [--browser] [--direct] [--seconds 60]"
+        )
+    sys.argv = ["listen", *argv[1:]]
+    from bet365.listen import main as listen_main
+
+    listen_main()
 
 
 def _run_setup() -> None:

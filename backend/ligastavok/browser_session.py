@@ -315,6 +315,8 @@ class PlaywrightCookieSession:
             try:
                 messages.append(self._ws_queue.get(timeout=min(0.25, remaining)))
             except queue.Empty:
+                if self._page is not None:
+                    self._page.wait_for_timeout(50)
                 continue
         return messages
 

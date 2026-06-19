@@ -94,6 +94,51 @@ function sortOddsByConfig(lines: OddsLine[], factorIds: number[]): OddsLine[] {
     .filter((line): line is OddsLine => line !== undefined);
 }
 
+/** Prefer 921/923; fall back to other two-way winner markets (tennis, basketball, …). */
+function pickDisplayOdds(lines: OddsLine[]): OddsLine[] {
+  const factorIds = oddsFactorIds();
+  const configured = sortOddsByConfig(lines, factorIds);
+  if (configured.length >= 2) {
+    return configured.slice(0, 2);
+  }
+
+  const by921923 = sortOddsByConfig(lines, [921, 923]);
+  if (by921923.length >= 2) {
+    return by921923;
+  }
+
+  const byMarket = new Map<string, OddsLine[]>();
+  for (const line of lines) {
+    if (line.isHandicapTotal) continue;
+    const key = line.lineParam != null ? String(line.lineParam) : "none";
+    const group = byMarket.get(key) ?? [];
+    group.push(line);
+    byMarket.set(key, group);
+  }
+
+  const preferredMarkets = [1777, 1763, 1450, 1446, 910080, 920054, 780112, 170153];
+  const groups = [...byMarket.entries()]
+    .filter(([, group]) => group.length >= 2)
+    .sort(([a], [b]) => {
+      const pa = a === "none" ? 9_999_999 : Number(a);
+      const pb = b === "none" ? 9_999_999 : Number(b);
+      const ia = preferredMarkets.indexOf(pa);
+      const ib = preferredMarkets.indexOf(pb);
+      if (ia !== -1 || ib !== -1) {
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      }
+      return pa - pb;
+    });
+
+  for (const [, group] of groups) {
+    const std = sortOddsByConfig(group, [921, 923]);
+    if (std.length >= 2) return std;
+    return group.slice(0, 2);
+  }
+
+  return configured;
+}
+
 const ODDS_FOR_MATCHES_SQL = `
 SELECT DISTINCT ON (o.match_id, o.factor_id, o.line_param)
     o.match_id,
@@ -101,14 +146,14 @@ SELECT DISTINCT ON (o.match_id, o.factor_id, o.line_param)
     o.odds::float8 AS odds,
     o.line_param_text,
     o.is_handicap_total,
-    o.market_event_name
+    o.market_event_name,
+    o.line_param
 FROM odds_lines o
 JOIN sites st ON st.id = o.site_id
 WHERE st.name = $1
   AND o.match_id = ANY($2::bigint[])
-  AND o.factor_id = ANY($3::int[])
-  AND o.market_event_id = o.match_id
-ORDER BY o.match_id, o.factor_id, o.line_param, o.snapshot_id DESC NULLS LAST
+ORDER BY o.match_id, o.factor_id, o.line_param,
+    o.snapshot_id DESC NULLS LAST
 `;
 
 function mapMatch(
@@ -149,6 +194,7 @@ function mapOdds(row: Record<string, unknown>): OddsLine {
   return {
     factorId,
     odds: Number(row.odds),
+    lineParam: row.line_param != null ? Number(row.line_param) : null,
     lineParamText: row.line_param_text as string | null,
     isHandicapTotal: Boolean(row.is_handicap_total),
     marketEventName: row.market_event_name as string | null,
@@ -205,14 +251,9 @@ export async function fetchLiveDashboard(
 
   const matchIds = matchesResult.rows.map((r) => Number(r.match_id));
   const oddsByMatch = new Map<number, OddsLine[]>();
-  const factorIds = oddsFactorIds();
 
   if (matchIds.length > 0) {
-    const oddsResult = await pool.query(ODDS_FOR_MATCHES_SQL, [
-      site,
-      matchIds,
-      factorIds,
-    ]);
+    const oddsResult = await pool.query(ODDS_FOR_MATCHES_SQL, [site, matchIds]);
     for (const row of oddsResult.rows) {
       const matchId = Number(row.match_id);
       const list = oddsByMatch.get(matchId) ?? [];
@@ -223,8 +264,8 @@ export async function fetchLiveDashboard(
 
   const matches = matchesResult.rows.map((row) => {
     const matchId = Number(row.match_id);
-    const sorted = sortOddsByConfig(oddsByMatch.get(matchId) ?? [], factorIds);
-    return mapMatch(row, sorted);
+    const picked = pickDisplayOdds(oddsByMatch.get(matchId) ?? []);
+    return mapMatch(row, picked);
   });
 
   return { matches, sports, selectedSport, stats };

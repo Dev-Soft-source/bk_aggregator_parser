@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { fetchLiveDashboard } from "@/lib/queries";
+import { pollCommandForSite } from "@/lib/site";
+import { siteName } from "@/lib/db";
 import type { MatchesResponse } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -18,12 +20,15 @@ export async function GET(request: NextRequest) {
       sport,
     );
 
+    const site = siteName();
     const body: MatchesResponse = {
       matches,
       sports,
       selectedSport,
       stats,
       fetchedAt: new Date().toISOString(),
+      siteName: site,
+      pollCommand: pollCommandForSite(site),
     };
 
     return NextResponse.json(body);

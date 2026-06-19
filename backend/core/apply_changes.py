@@ -45,10 +45,22 @@ def _upsert_country(cur: psycopg2.extensions.cursor, name: str) -> int:
     return int(row[0])
 
 
-def _group_latest(changes: list[Change]) -> dict[int, dict[ChangeType, Change]]:
-    by_match: dict[int, dict[ChangeType, Change]] = defaultdict(dict)
+def _group_latest(changes: list[Change]) -> dict[int, dict[str, Any]]:
+    """Group changes per match; ODDS is a list (multiple markets per fixture)."""
+    by_match: dict[int, dict[str, Any]] = defaultdict(
+        lambda: {
+            ChangeType.FIXTURE: None,
+            ChangeType.SCORE: None,
+            ChangeType.BETTING_STATUS: None,
+            "odds": [],
+        }
+    )
     for change in changes:
-        by_match[change.match_payload_id][change.change_type] = change
+        bucket = by_match[change.match_payload_id]
+        if change.change_type == ChangeType.ODDS:
+            bucket["odds"].append(change)
+        else:
+            bucket[change.change_type] = change
     return by_match
 
 
@@ -241,22 +253,34 @@ def apply_changes(
                     ),
                 )
 
-            odds_change = type_map.get(ChangeType.ODDS)
-            if odds_change:
+            odds_changes: list[Change] = type_map.get("odds") or []
+            all_factor_ids: list[int] = []
+            for odds_change in odds_changes:
                 op = odds_change.payload
                 outcomes = op.get("outcomes") or []
+                market_id = op.get("market_id")
+                line_param = normalize_line_param(market_id)
                 odds_rows: list[tuple[Any, ...]] = []
-                for idx, outcome in enumerate(outcomes[: len(NORMALIZED_FACTOR_IDS)]):
-                    factor_id = NORMALIZED_FACTOR_IDS[idx]
+                factor_ids_used: list[int] = []
+                for idx, outcome in enumerate(outcomes):
+                    raw_factor = outcome.get("factor_id")
+                    if raw_factor is not None:
+                        factor_id = int(raw_factor)
+                    elif idx < len(NORMALIZED_FACTOR_IDS):
+                        factor_id = NORMALIZED_FACTOR_IDS[idx]
+                    else:
+                        continue
+                    factor_ids_used.append(factor_id)
+                    all_factor_ids.append(factor_id)
                     odds_rows.append(
                         (
                             site_id,
                             match_id,
-                            match_id,
+                            op.get("market_event_id") or match_id,
                             op.get("market_event_name") or "main",
                             factor_id,
                             outcome.get("odds"),
-                            normalize_line_param(outcome.get("line_param")),
+                            line_param,
                             outcome.get("factor_id"),
                             outcome.get("line_param_text"),
                             bool(outcome.get("is_handicap_total")),
@@ -264,16 +288,30 @@ def apply_changes(
                         )
                     )
 
-                if odds_rows:
+                if odds_rows and line_param is not None:
                     cur.execute(
                         """
                         DELETE FROM odds_lines
                         WHERE site_id = %s
                           AND match_id = %s
+                          AND line_param = %s
                           AND factor_id <> ALL(%s)
                         """,
-                        (site_id, match_id, list(NORMALIZED_FACTOR_IDS)),
+                        (site_id, match_id, line_param, factor_ids_used),
                     )
+                elif odds_rows:
+                    cur.execute(
+                        """
+                        DELETE FROM odds_lines
+                        WHERE site_id = %s
+                          AND match_id = %s
+                          AND line_param IS NULL
+                          AND factor_id <> ALL(%s)
+                        """,
+                        (site_id, match_id, factor_ids_used),
+                    )
+
+                if odds_rows:
                     psycopg2.extras.execute_batch(
                         cur,
                         """

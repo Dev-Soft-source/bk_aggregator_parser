@@ -7,6 +7,7 @@ export interface SportCategory {
 export interface OddsLine {
   factorId: number;
   odds: number;
+  lineParam: number | null;
   lineParamText: string | null;
   isHandicapTotal: boolean;
   marketEventName: string | null;
@@ -48,4 +49,6 @@ export interface MatchesResponse {
   selectedSport: string | null;
   stats: DashboardStats;
   fetchedAt: string;
+  siteName: string;
+  pollCommand: string;
 }

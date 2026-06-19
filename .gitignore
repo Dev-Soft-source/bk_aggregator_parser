@@ -4,6 +4,7 @@ backend/adapters/__pycache__/
 backend/fontbet/__pycache__/
 backend/scripts/__pycache__/
 backend/.env
+frontend/.env.local
 .liga_browser_profile/
 *.py[cod]
 *$py.class

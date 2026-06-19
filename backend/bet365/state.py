@@ -1,0 +1,409 @@
+"""In-memory bet365 ZAP feed state (events, markets, selections)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from bet365.odds_config import (
+    import_all_from_socket,
+    main_market_id,
+    skip_esoccer,
+    soccer_class_id,
+)
+from bet365.zap_parse import (
+    ZapMessage,
+    field_int,
+    fractional_to_decimal,
+    merge_fields,
+    parse_match_teams,
+    parse_wire_chunk,
+    sport_class_from_event_fields,
+)
+
+
+@dataclass
+class SelectionState:
+    it: str
+    fi: int | None = None
+    ma_id: int | None = None
+    name: str | None = None
+    order: int | None = None
+    odds_frac: str | None = None
+    odds_decimal: float | None = None
+    suspended: bool = False
+    fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class MarketState:
+    it: str
+    fi: int | None = None
+    market_id: int | None = None
+    name: str | None = None
+    fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class EventState:
+    fi: int
+    it: str | None = None
+    name: str | None = None
+    competition: str | None = None
+    sport_class: int | None = None
+    score: str | None = None
+    minute: int | None = None
+    live: bool = False
+    team1: str | None = None
+    team2: str | None = None
+    fields: dict[str, Any] = field(default_factory=dict)
+
+
+class ZapFeedState:
+    def __init__(self) -> None:
+        self.events: dict[int, EventState] = {}
+        self.markets: dict[str, MarketState] = {}
+        self.selections: dict[str, SelectionState] = {}
+        self.sport_classes: dict[int, str] = {}
+        self._frame_count = 0
+
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
+    def apply_chunk(self, chunk: str) -> None:
+        _, message = parse_wire_chunk(chunk)
+        if message is None:
+            return
+        self._frame_count += 1
+        self._apply_message(message)
+
+    def apply_body(self, body: str, *, path: str | None = None, op: str | None = None) -> None:
+        from bet365.zap_parse import parse_message_body
+
+        message = parse_message_body(body if body and body[0] in "FUID" else f"F|{body}")
+        if message is None:
+            return
+        if op:
+            message = ZapMessage(op=op, path=path, records=message.records)
+        elif path:
+            message = ZapMessage(op=message.op, path=path, records=message.records)
+        self._frame_count += 1
+        self._apply_message(message)
+
+    def _apply_message(self, message: ZapMessage) -> None:
+        if message.op in ("F", "I"):
+            cursor_ev: EventState | None = None
+            cursor_ma: MarketState | None = None
+            cursor_pa: SelectionState | None = None
+            for record in message.records:
+                if record.kind == "EV":
+                    cursor_ev = self._upsert_event(record.fields)
+                    cursor_ma = None
+                    cursor_pa = None
+                elif record.kind == "MA":
+                    cursor_ma = self._upsert_market(record.fields, cursor_ev)
+                    cursor_pa = None
+                elif record.kind == "PA":
+                    cursor_pa = self._upsert_selection(record.fields, cursor_ma, cursor_ev)
+                elif record.kind == "CL":
+                    class_id = field_int(record.fields, "ID")
+                    name = record.fields.get("NA")
+                    if class_id is not None and name:
+                        self.sport_classes[class_id] = name
+            return
+
+        if message.op == "U":
+            self._apply_update(message.path, message.records)
+            return
+
+        if message.op == "D":
+            if message.path:
+                self.selections.pop(message.path, None)
+                self.markets.pop(message.path, None)
+
+    def _upsert_event(self, fields: dict[str, str]) -> EventState | None:
+        fi = field_int(fields, "FI")
+        if fi is None:
+            return None
+        event = self.events.get(fi)
+        if event is None:
+            event = EventState(fi=fi)
+            self.events[fi] = event
+        merge_fields(event.fields, fields)
+        if fields.get("NA"):
+            event.name = fields["NA"]
+            event.team1, event.team2 = parse_match_teams(fields["NA"])
+        if fields.get("CT"):
+            event.competition = fields["CT"]
+        sport_class = sport_class_from_event_fields(fields)
+        if sport_class is not None:
+            event.sport_class = sport_class
+        if fields.get("SS"):
+            event.score = fields["SS"]
+        if fields.get("TM"):
+            event.minute = field_int(fields, "TM")
+        if fields.get("FS") is not None:
+            event.live = fields.get("FS") == "1"
+        if fields.get("IT"):
+            event.it = fields["IT"]
+        return event
+
+    def _upsert_market(
+        self,
+        fields: dict[str, str],
+        event: EventState | None,
+    ) -> MarketState | None:
+        it = fields.get("IT")
+        if not it:
+            fi = field_int(fields, "FI")
+            mid = field_int(fields, "ID")
+            if fi is not None and mid is not None:
+                it = f"_ma_{fi}_{mid}"
+            else:
+                return None
+        market = self.markets.get(it)
+        if market is None:
+            market = MarketState(it=it)
+            self.markets[it] = market
+        merge_fields(market.fields, fields)
+        market.fi = field_int(fields, "FI") or market.fi
+        market.market_id = field_int(fields, "ID") or market.market_id
+        if fields.get("NA"):
+            market.name = fields["NA"]
+        if event is not None and market.fi is None:
+            market.fi = event.fi
+        return market
+
+    def _upsert_selection(
+        self,
+        fields: dict[str, str],
+        market: MarketState | None,
+        event: EventState | None,
+    ) -> SelectionState | None:
+        it = fields.get("IT")
+        if not it:
+            return None
+        selection = self.selections.get(it)
+        if selection is None:
+            selection = SelectionState(it=it)
+            self.selections[it] = selection
+        merge_fields(selection.fields, fields)
+        selection.fi = field_int(fields, "FI") or selection.fi
+        if market is not None:
+            selection.ma_id = market.market_id or selection.ma_id
+            if selection.fi is None:
+                selection.fi = market.fi
+        if event is not None and selection.fi is None:
+            selection.fi = event.fi
+        if fields.get("NA"):
+            selection.name = fields["NA"]
+        if fields.get("OR"):
+            selection.order = field_int(fields, "OR")
+        if fields.get("MA"):
+            selection.ma_id = field_int(fields, "MA") or selection.ma_id
+        if fields.get("OD"):
+            selection.odds_frac = fields["OD"]
+            selection.odds_decimal = fractional_to_decimal(fields["OD"])
+        if fields.get("SU") is not None:
+            selection.suspended = fields["SU"] == "1"
+        return selection
+
+    def _apply_update(self, path: str | None, records: list) -> None:
+        patch: dict[str, str] = {}
+        for record in records:
+            patch.update(record.fields)
+
+        if not patch:
+            return
+
+        selection = self._selection_for_path(path)
+        event = self._event_for_path(path, selection)
+
+        if selection is not None:
+            merge_fields(selection.fields, patch)
+            if patch.get("OD"):
+                selection.odds_frac = patch["OD"]
+                selection.odds_decimal = fractional_to_decimal(patch["OD"])
+            if patch.get("SU") is not None:
+                selection.suspended = patch["SU"] == "1"
+            if patch.get("NA"):
+                selection.name = patch["NA"]
+            if patch.get("OR"):
+                selection.order = field_int(patch, "OR")
+
+        if event is not None:
+            merge_fields(event.fields, patch)
+            if patch.get("SS"):
+                event.score = patch["SS"]
+            if patch.get("TM"):
+                event.minute = field_int(patch, "TM")
+            if patch.get("TU"):
+                event.fields["TU"] = patch["TU"]
+            if patch.get("TS"):
+                event.fields["TS"] = patch["TS"]
+
+    def _selection_for_path(self, path: str | None) -> SelectionState | None:
+        if not path:
+            return None
+        if path in self.selections:
+            return self.selections[path]
+        if path.startswith("OV"):
+            return self.selections.get(path[2:])
+        if path.startswith("P") and "-" in path:
+            return self.selections.get(path[1:])
+        return None
+
+    def _event_for_path(
+        self,
+        path: str | None,
+        selection: SelectionState | None,
+    ) -> EventState | None:
+        if selection is not None and selection.fi is not None:
+            event = self.resolve_event_for_market_fi(selection.fi)
+            if event is not None:
+                return event
+        if not path:
+            return None
+        for event in self.events.values():
+            if event.it and path.startswith(event.it):
+                return event
+        return None
+
+    def resolve_event_for_market_fi(self, market_fi: int) -> EventState | None:
+        for event in self.events.values():
+            if self.market_fi(event) == market_fi:
+                return event
+        return self.events.get(market_fi)
+
+    def sport_class_for(self, event: EventState) -> int | None:
+        if event.sport_class is not None:
+            return event.sport_class
+        return sport_class_from_event_fields(event.fields)
+
+    def sport_name(self, event: EventState) -> str:
+        sport_class = self.sport_class_for(event)
+        if sport_class is not None:
+            return self.sport_classes.get(sport_class) or f"Sport {sport_class}"
+        return "Unknown"
+
+    def export_events(self, *, live_only: bool = False) -> list[EventState]:
+        """Events to export — all sports with odds when import_all, else soccer 1X2 only."""
+        if import_all_from_socket():
+            return self._export_all_events(live_only=live_only)
+        return self.soccer_events_with_main_market() if not live_only else [
+            e for e in self.soccer_events_with_main_market() if e.live
+        ]
+
+    def _export_all_events(self, *, live_only: bool) -> list[EventState]:
+        result: list[EventState] = []
+        for event in self.events.values():
+            if live_only and not event.live:
+                continue
+            if skip_esoccer() and self._is_esoccer(event):
+                continue
+            if not self._is_match_event(event):
+                continue
+            if not self._event_has_odds(event):
+                continue
+            result.append(event)
+        result.sort(
+            key=lambda e: (
+                e.sport_class or 0,
+                e.competition or "",
+                e.name or "",
+            )
+        )
+        return result
+
+    def markets_with_odds(
+        self, event: EventState
+    ) -> list[tuple[int, str | None, list[SelectionState]]]:
+        """All markets on an event that have at least one priced selection."""
+        market_fi = self.market_fi(event)
+        by_market: dict[int, list[SelectionState]] = {}
+        for sel in self.selections.values():
+            if sel.fi != market_fi or sel.odds_decimal is None or sel.suspended:
+                continue
+            if sel.ma_id is None:
+                continue
+            by_market.setdefault(sel.ma_id, []).append(sel)
+
+        result: list[tuple[int, str | None, list[SelectionState]]] = []
+        for ma_id, sels in by_market.items():
+            name = self._market_name(market_fi, ma_id)
+            sels.sort(key=lambda s: (s.order if s.order is not None else 99, s.it))
+            result.append((ma_id, name, sels))
+        result.sort(key=lambda item: (item[0], item[1] or ""))
+        return result
+
+    def _market_name(self, market_fi: int, market_id: int) -> str | None:
+        for market in self.markets.values():
+            if market.fi == market_fi and market.market_id == market_id:
+                return market.name
+        return None
+
+    def _is_match_event(self, event: EventState) -> bool:
+        name = event.name or ""
+        it = str(event.fields.get("IT") or "")
+        if it.startswith("P-") or it.startswith("PV_"):
+            return False
+        if not name.strip():
+            return False
+        lower = name.lower()
+        return " v " in lower or " vs " in lower or " @ " in lower
+
+    def _event_has_odds(self, event: EventState) -> bool:
+        market_fi = self.market_fi(event)
+        return any(
+            s.fi == market_fi and s.odds_decimal is not None and not s.suspended
+            for s in self.selections.values()
+        )
+
+    def soccer_events_with_main_market(self) -> list[EventState]:
+        market_id = main_market_id()
+        soccer_id = soccer_class_id()
+        result: list[EventState] = []
+        for event in self.events.values():
+            if event.sport_class != soccer_id:
+                continue
+            if skip_esoccer() and self._is_esoccer(event):
+                continue
+            if not self._has_main_market(event, market_id):
+                continue
+            result.append(event)
+        result.sort(key=lambda e: (e.competition or "", e.name or ""))
+        return result
+
+    def market_fi(self, event: EventState) -> int:
+        """Fixture id used on MA/PA rows (often OI, not EV.FI)."""
+        oi = field_int(event.fields, "OI")
+        return oi if oi is not None else event.fi
+
+    def main_market_outcomes(self, event: EventState) -> list[SelectionState]:
+        market_id = main_market_id()
+        market_fi = self.market_fi(event)
+        by_order: dict[int, SelectionState] = {}
+        for s in self.selections.values():
+            if s.fi != market_fi or s.ma_id != market_id or s.odds_decimal is None:
+                continue
+            if s.order is None:
+                continue
+            by_order[s.order] = s
+        return [by_order[k] for k in sorted(by_order)]
+
+    def _has_main_market(self, event: EventState, market_id: int) -> bool:
+        market_fi = self.market_fi(event)
+        return any(
+            s.fi == market_fi and s.ma_id == market_id and s.odds_decimal is not None
+            for s in self.selections.values()
+        )
+
+    @staticmethod
+    def _is_esoccer(event: EventState) -> bool:
+        comp = (event.competition or "").lower()
+        if "esoccer" in comp or "e-soccer" in comp:
+            return True
+        ck = str(event.fields.get("CK") or "").upper()
+        cc = str(event.fields.get("CC") or "").upper()
+        return ck.startswith("ESOC") or cc.startswith("ESOC")
