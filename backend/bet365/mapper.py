@@ -21,6 +21,12 @@ from bet365.zap_parse import field_int, parse_match_teams, sport_class_from_even
 _LONDON = ZoneInfo("Europe/London")
 
 
+def _format_clock(total_seconds: int) -> str:
+    mins = max(0, total_seconds) // 60
+    secs = max(0, total_seconds) % 60
+    return f"{mins}:{secs:02d}"
+
+
 def _parse_score(score: str) -> tuple[int | None, int | None]:
     text = (score or "").strip()
     if "-" not in text:
@@ -74,22 +80,26 @@ def _timer_payload(event: EventState) -> dict[str, Any]:
 
     tu_epoch = _parse_tu_epoch(event.timer_tu or event.fields.get("TU"))
 
+    # Bet365 often emits live rows with TM=0 even when the match is already in play
+    # (for example soccer 1-0, tennis set scores, etc). Showing that as 0:00 is worse
+    # than hiding the timer, so only trust a zero-minute clock when TU can anchor it.
+    if mins == 0 and tu_epoch is None:
+        return {}
+
     if ticking and tu_epoch is not None:
         # passed = (NOW - TU) + TM*60 + TS
         passed = max(0, int(time.time()) - tu_epoch) + base
-        display_min = passed // 60
         return {
-            "minute": display_min,
+            "minute": passed // 60,
             "timer_seconds": passed,
-            "timer_display": f"{display_min}'",
+            "timer_display": _format_clock(passed),
             "score_function": "run",
         }
 
-    display_min = mins if tm is not None else base // 60
     return {
-        "minute": display_min,
+        "minute": mins if tm is not None else base // 60,
         "timer_seconds": base,
-        "timer_display": f"{display_min}'",
+        "timer_display": _format_clock(base),
         "score_function": "run" if ticking else "stop",
     }
 

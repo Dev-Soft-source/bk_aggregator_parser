@@ -198,7 +198,7 @@ class ZapStateTests(unittest.TestCase):
 
         event = EventState(fi=1, minute=73, timer_secs=0, live=True)
         payload = _timer_payload(event)
-        self.assertEqual(payload["timer_display"], "73'")
+        self.assertEqual(payload["timer_display"], "73:00")
         self.assertEqual(payload["score_function"], "run")
         self.assertEqual(payload["timer_seconds"], 73 * 60)
 
@@ -210,8 +210,15 @@ class ZapStateTests(unittest.TestCase):
             fi=1, minute=45, timer_secs=0, timer_ticking=False, live=True
         )
         payload = _timer_payload(event)
-        self.assertEqual(payload["timer_display"], "45'")
+        self.assertEqual(payload["timer_display"], "45:00")
         self.assertEqual(payload["score_function"], "stop")
+
+    def test_timer_hides_untrusted_zero_minute_clock(self) -> None:
+        from bet365.mapper import _timer_payload
+        from bet365.state import EventState
+
+        event = EventState(fi=1, minute=0, timer_secs=22, timer_ticking=True, live=True)
+        self.assertEqual(_timer_payload(event), {})
 
     def test_timer_uses_tu_when_ticking(self) -> None:
         from datetime import datetime, timedelta
@@ -236,7 +243,7 @@ class ZapStateTests(unittest.TestCase):
         self.assertEqual(payload["score_function"], "run")
         self.assertGreaterEqual(payload["timer_seconds"], 10 * 60 + 120)
         self.assertLess(payload["timer_seconds"], 10 * 60 + 180)
-        self.assertTrue(payload["timer_display"].endswith("'"))
+        self.assertRegex(payload["timer_display"], r"^\d+:\d{2}$")
 
     def test_map_score_timer_stop_on_break(self) -> None:
         state = ZapFeedState()
@@ -250,7 +257,7 @@ class ZapStateTests(unittest.TestCase):
         )
         changes = map_state_to_changes(state)
         score = next(c for c in changes if c.change_type.value == "score")
-        self.assertEqual(score.payload["timer_display"], "45'")
+        self.assertEqual(score.payload["timer_display"], "45:00")
         self.assertEqual(score.payload["score_function"], "stop")
 
 
