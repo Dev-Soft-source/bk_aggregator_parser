@@ -1,5 +1,5 @@
-# BK Aggregator Parser
 
+<<<<<<< HEAD
 A bookmaker line parsing system for ingesting live sports data from bookmaker sites, normalizing it into a canonical model, and reviewing it in a web UI. The current focus is the **CORE layer** plus a **review frontend** — partner delivery (AMQP, multi-tenant HTTP API) is planned for a later phase.
 
 The first supported bookmaker is **Fonbet** (`fonbet.com`). The architecture is designed so additional bookmakers can be added as separate adapter packages without changing core contracts.
@@ -216,3 +216,5 @@ Out of scope until CORE is stable: RabbitMQ unified feed, partner HTTP API, arbi
 ## License
 
 Not specified in the repository. Add a license file if you intend to distribute this project.
+=======
+>>>>>>> 5f63ea7431d30b7820e899815f804b3ccdfa7cb2
