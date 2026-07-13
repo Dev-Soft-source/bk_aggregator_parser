@@ -9,9 +9,17 @@ import psycopg2.extras
 
 from adapters.base import Change, ChangeType
 from fonbet.parsers import event_year_from_start_time, normalize_line_param, unix_to_datetime
-from retention import current_utc_year, prune_snapshots, prune_stale_matches
+from retention import (
+    current_utc_year,
+    prune_absent_matches,
+    prune_orphan_catalog,
+    prune_past_place_matches,
+    prune_snapshots,
+    prune_snapshots_to_current,
+    prune_stale_matches,
+)
 
-# Frontend queries use ODDS_FACTOR_IDS=921,923 — map Liga Stavok 2-way line to same slots.
+# Frontend queries use ODDS_FACTOR_IDS=921,922,923 — map Liga Stavok 2-way line to 921/923 slots.
 NORMALIZED_FACTOR_IDS: tuple[int, ...] = (921, 923)
 
 
@@ -73,6 +81,11 @@ def apply_changes(
     source_file: str = "ligastavok",
     retain_snapshot_years: int = 1,
     prune_matches_before_year: int | None = None,
+    active_match_ids: set[int] | list[int] | None = None,
+    prune_absent: bool = False,
+    retain_snapshot_count: int | None = None,
+    prune_place: str | None = "live",
+    prune_past_hours: int | None = None,
 ) -> tuple[int, dict[str, int]]:
     """Write adapter changes to PostgreSQL. Returns (snapshot_id, counts)."""
     grouped = _group_latest(changes)
@@ -86,6 +99,8 @@ def apply_changes(
         "odds_lines": 0,
         "snapshots_deleted": 0,
         "matches_deleted": 0,
+        "leagues_deleted": 0,
+        "sports_deleted": 0,
     }
 
     with conn.cursor() as cur:
@@ -205,15 +220,27 @@ def apply_changes(
                     )
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
                     ON CONFLICT (site_id, match_id) DO UPDATE
-                    SET score1 = EXCLUDED.score1,
-                        score2 = EXCLUDED.score2,
-                        timer_seconds = EXCLUDED.timer_seconds,
-                        timer_display = EXCLUDED.timer_display,
-                        score_function = EXCLUDED.score_function,
-                        raw_scores = EXCLUDED.raw_scores,
+                    SET score1 = COALESCE(EXCLUDED.score1, match_scores.score1),
+                        score2 = COALESCE(EXCLUDED.score2, match_scores.score2),
+                        timer_seconds = COALESCE(
+                            EXCLUDED.timer_seconds, match_scores.timer_seconds
+                        ),
+                        timer_display = COALESCE(
+                            EXCLUDED.timer_display, match_scores.timer_display
+                        ),
+                        score_function = COALESCE(
+                            EXCLUDED.score_function, match_scores.score_function
+                        ),
+                        raw_scores = COALESCE(
+                            EXCLUDED.raw_scores, match_scores.raw_scores
+                        ),
                         timer_updated_at = CASE
-                            WHEN EXCLUDED.timer_seconds IS NOT NULL
-                              OR EXCLUDED.timer_display IS NOT NULL
+                            -- Running clocks: refresh every poll so the UI ticks
+                            -- from the last import, not from a stale TM change.
+                            WHEN EXCLUDED.score_function = 'run' THEN NOW()
+                            WHEN EXCLUDED.timer_seconds IS DISTINCT FROM match_scores.timer_seconds
+                              OR EXCLUDED.timer_display IS DISTINCT FROM match_scores.timer_display
+                              OR EXCLUDED.score_function IS DISTINCT FROM match_scores.score_function
                             THEN NOW()
                             ELSE match_scores.timer_updated_at
                         END,
@@ -339,8 +366,39 @@ def apply_changes(
             before_year = current_utc_year() - retain_snapshot_years + 1
             counts["snapshots_deleted"] = prune_snapshots(cur, site_id, before_year)
         if prune_matches_before_year is not None:
-            counts["matches_deleted"] = prune_stale_matches(
+            counts["matches_deleted"] += prune_stale_matches(
                 cur, site_id, prune_matches_before_year
+            )
+        if prune_past_hours is not None and prune_past_hours > 0 and prune_place:
+            past_deleted = prune_past_place_matches(
+                cur,
+                site_id,
+                place=prune_place,
+                grace_hours=prune_past_hours,
+            )
+            counts["matches_deleted"] += past_deleted
+            if past_deleted:
+                orphans = prune_orphan_catalog(cur, site_id)
+                counts["leagues_deleted"] += orphans["leagues_deleted"]
+                counts["sports_deleted"] += orphans["sports_deleted"]
+        if prune_absent:
+            keep_ids = set(active_match_ids or ())
+            keep_ids.update(match_ids)
+            deleted = prune_absent_matches(
+                cur, site_id, keep_ids, place=prune_place
+            )
+            counts["matches_deleted"] += deleted
+            if deleted:
+                orphans = prune_orphan_catalog(cur, site_id)
+                counts["leagues_deleted"] += orphans["leagues_deleted"]
+                counts["sports_deleted"] += orphans["sports_deleted"]
+            # Replace mode: only the current snapshot is needed.
+            counts["snapshots_deleted"] += prune_snapshots_to_current(
+                cur, site_id, snapshot_id
+            )
+        elif retain_snapshot_count is not None and retain_snapshot_count <= 1:
+            counts["snapshots_deleted"] += prune_snapshots_to_current(
+                cur, site_id, snapshot_id
             )
 
     conn.commit()

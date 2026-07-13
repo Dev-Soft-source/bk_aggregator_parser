@@ -82,6 +82,67 @@ class ZapStateTests(unittest.TestCase):
         changes = map_state_to_changes(state)
         odds = [c for c in changes if c.change_type.value == "odds"]
         self.assertGreater(len(odds), 5)
+        statuses = [c for c in changes if c.change_type.value == "betting_status"]
+        self.assertGreater(len(statuses), 0)
+        self.assertTrue(all(c.payload.get("state") in ("unblocked", "blocked") for c in statuses))
+        self.assertTrue(any(c.payload.get("state") == "unblocked" for c in statuses))
+
+    def test_finished_non_live_with_score_not_exported(self) -> None:
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=701;CL=1;NA=Home v Away;CT=League;FS=0;SS=2-1;TM=90;OI=702;|"
+            "MA;FI=702;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=702;ID=1;IT=L702-1_1;NA=Home;OD=2/1;OR=0;|"
+            "PA;FI=702;ID=2;IT=L702-2_1;NA=Draw;OD=3/1;OR=1;|"
+            "PA;FI=702;ID=3;IT=L702-3_1;NA=Away;OD=4/1;OR=2;|"
+        )
+        self.assertTrue(state._is_finished(state.events[701]))
+        self.assertEqual(state.export_events(), [])
+        self.assertEqual(state.drop_finished_events(), 1)
+        self.assertNotIn(701, state.events)
+
+    def test_live_match_still_exported(self) -> None:
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=801;CL=1;NA=Home v Away;CT=League;FS=1;SS=1-0;TM=22;OI=802;|"
+            "MA;FI=802;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=802;ID=1;IT=L802-1_1;NA=Home;OD=2/1;OR=0;|"
+            "PA;FI=802;ID=2;IT=L802-2_1;NA=Draw;OD=3/1;OR=1;|"
+            "PA;FI=802;ID=3;IT=L802-3_1;NA=Away;OD=4/1;OR=2;|"
+        )
+        exported = state.export_events()
+        self.assertEqual(len(exported), 1)
+        self.assertEqual(exported[0].fi, 801)
+        self.assertEqual(state.drop_finished_events(), 0)
+
+    def test_betting_status_blocked_when_suspended(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=101;CL=1;NA=Home v Away;CT=League;FS=1;OI=201;|"
+            "MA;FI=201;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=201;ID=1;IT=L201-1_1;NA=Home;OD=2/1;OR=0;SU=1;|"
+            "PA;FI=201;ID=2;IT=L201-2_1;NA=Draw;OD=3/1;OR=1;SU=1;|"
+            "PA;FI=201;ID=3;IT=L201-3_1;NA=Away;OD=4/1;OR=2;SU=1;|"
+        )
+        with patch.dict(os.environ, {"BET365_IMPORT_ALL": "false"}):
+            changes = map_state_to_changes(state)
+        status = next(c for c in changes if c.change_type.value == "betting_status")
+        self.assertEqual(status.payload["state"], "blocked")
+
+    def test_live_odds_removed_treated_finished(self) -> None:
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=901;CL=1;NA=Home v Away;CT=League;FS=1;SS=3-0;TM=90;OI=902;|"
+        )
+        self.assertTrue(state._is_finished(state.events[901]))
+        self.assertEqual(state.drop_finished_events(), 1)
 
     def test_tennis_two_way_maps_to_921_923(self) -> None:
         state = ZapFeedState()
@@ -129,6 +190,68 @@ class ZapStateTests(unittest.TestCase):
         sel = state.selections["L888-1_1_3"]
         self.assertEqual(sel.odds_frac, "9/4")
         self.assertAlmostEqual(sel.odds_decimal or 0, 3.25)
+
+
+    def test_timer_runs_for_live_without_tu(self) -> None:
+        from bet365.mapper import _timer_payload
+        from bet365.state import EventState
+
+        event = EventState(fi=1, minute=73, timer_secs=0, live=True)
+        payload = _timer_payload(event)
+        self.assertEqual(payload["timer_display"], "73'")
+        self.assertEqual(payload["score_function"], "run")
+        self.assertEqual(payload["timer_seconds"], 73 * 60)
+
+    def test_timer_frozen_on_break(self) -> None:
+        from bet365.mapper import _timer_payload
+        from bet365.state import EventState
+
+        event = EventState(
+            fi=1, minute=45, timer_secs=0, timer_ticking=False, live=True
+        )
+        payload = _timer_payload(event)
+        self.assertEqual(payload["timer_display"], "45'")
+        self.assertEqual(payload["score_function"], "stop")
+
+    def test_timer_uses_tu_when_ticking(self) -> None:
+        from datetime import datetime, timedelta
+        from zoneinfo import ZoneInfo
+
+        from bet365.mapper import _timer_payload
+        from bet365.state import EventState
+
+        london = ZoneInfo("Europe/London")
+        # Period sync ~2 minutes ago, feed says TM=10 TS=0 → ~12'
+        sync = datetime.now(tz=london) - timedelta(minutes=2, seconds=5)
+        tu = sync.strftime("%Y%m%d%H%M%S")
+        event = EventState(
+            fi=1,
+            minute=10,
+            timer_secs=0,
+            timer_ticking=True,
+            timer_tu=tu,
+            live=True,
+        )
+        payload = _timer_payload(event)
+        self.assertEqual(payload["score_function"], "run")
+        self.assertGreaterEqual(payload["timer_seconds"], 10 * 60 + 120)
+        self.assertLess(payload["timer_seconds"], 10 * 60 + 180)
+        self.assertTrue(payload["timer_display"].endswith("'"))
+
+    def test_map_score_timer_stop_on_break(self) -> None:
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=501;CL=1;NA=Home v Away;FS=1;SS=1-0;TM=45;TS=0;TT=0;OI=502;|"
+            "MA;FI=502;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=502;ID=1;IT=L502-1_1;NA=Home;OD=2/1;OR=0;|"
+            "PA;FI=502;ID=2;IT=L502-2_1;NA=Draw;OD=3/1;OR=1;|"
+            "PA;FI=502;ID=3;IT=L502-3_1;NA=Away;OD=4/1;OR=2;|"
+        )
+        changes = map_state_to_changes(state)
+        score = next(c for c in changes if c.change_type.value == "score")
+        self.assertEqual(score.payload["timer_display"], "45'")
+        self.assertEqual(score.payload["score_function"], "stop")
 
 
 if __name__ == "__main__":

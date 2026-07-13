@@ -134,7 +134,11 @@ BET365_BROWSER_URL=https://www.bet365.com/#/HO/
 BET365_WAIT_FOR_CLOUDFLARE=true
 BET365_CLOUDFLARE_AUTO_CLICK=true
 BET365_CLOUDFLARE_AUTO_CLICK_DELAY_SECONDS=30
+BET365_COOKIE_BANNER_AUTO_CLICK=true
+BET365_COOKIE_BANNER_DELAY_SECONDS=5
 ```
+
+On a **fresh CDP Chrome profile**, the cookie consent bar appears once. The poller waits **5 seconds**, then clicks **Accept all** (`Nõustu kõigiga` in Estonian).
 
 If Cloudflare reappears mid-poll, the adapter pauses again and prompts you.
 

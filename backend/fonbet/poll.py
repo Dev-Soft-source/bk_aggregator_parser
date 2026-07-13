@@ -9,11 +9,32 @@ from pathlib import Path
 
 from config import DatabaseConfig
 from db import connect, init_schema, run_migration
+from fonbet.sports_reference import resolve_appendix_path
 from fonbet.api import FonbetApiError, fetch_list, fetch_list_light, packet_version
 from fonbet.config import FonbetApiConfig
 from fonbet.importer import import_packet
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_FONBET_SITE = "fonbet.com"
+OTHER_BOOKMAKER_SITES = frozenset(
+    {"bet365.com", "ligastavok.ru", "betcity.ru", "betcity"}
+)
+
+
+def resolve_site_name(requested: str | None, env_site_name: str | None) -> str:
+    """
+    Canonical Fonbet site for DB writes.
+
+    - Explicit --site-name wins
+    - Env SITE_NAME from another bookmaker is ignored → fonbet.com
+    """
+    if requested:
+        return requested.strip() or DEFAULT_FONBET_SITE
+    env_name = (env_site_name or "").strip()
+    if not env_name or env_name in OTHER_BOOKMAKER_SITES:
+        return DEFAULT_FONBET_SITE
+    return env_name
 
 
 def run_poll(
@@ -73,11 +94,16 @@ def run_poll(
                     f"[{iteration}] snapshot={snapshot_id} packetVersion={version} "
                     f"sports={counts['sports']} matches={counts['matches']} "
                     f"scores={counts['scores_updated']} odds={counts['odds_lines']} "
-                    f"pruned_snapshots={counts['snapshots_deleted']}"
+                    f"pruned_matches={counts.get('matches_deleted', 0)} "
+                    f"pruned_snapshots={counts.get('snapshots_deleted', 0)}"
                 )
             except Exception as exc:
                 logger.exception("Poll iteration %s failed: %s", iteration, exc)
                 print(f"[{iteration}] ERROR: {exc} — resetting with listLight on next tick")
+                try:
+                    conn.rollback()
+                except Exception:
+                    logger.exception("Rollback after poll failure failed")
                 version = None
 
             if max_iterations is not None and iteration >= max_iterations:
@@ -99,7 +125,8 @@ def main() -> None:
     parser.add_argument("--site-name", default=None)
     parser.add_argument(
         "--appendix",
-        default=str(Path(__file__).resolve().parent / "Appendix_A_sports_EN.md"),
+        default=None,
+        help="Path to Appendix_A_sports_EN.md (default: docs/ or fonbet/)",
     )
     parser.add_argument(
         "--interval",
@@ -138,18 +165,33 @@ def main() -> None:
             timeout=api_config.timeout,
         )
 
-    site_name = args.site_name or db_config.site_name
+    site_name = resolve_site_name(args.site_name, db_config.site_name)
     max_iter = 2 if args.once else None  # once = listLight + one list call
+
+    appendix_path = resolve_appendix_path(
+        Path(args.appendix) if args.appendix else None
+    )
+    if appendix_path is None:
+        raise SystemExit(
+            "Appendix A not found. Place Appendix_A_sports_EN.md under docs/ "
+            "or fonbet/, or pass --appendix PATH"
+        )
 
     print(f"Polling every {api_config.poll_interval}s for {site_name}")
     print(f"  listLight: {api_config.list_light_url}")
     print(f"  list:      {api_config.list_url_base}?lang=...&version=<packetVersion>&scopeMarket=...")
+    print(f"  appendix:  {appendix_path}")
+    if (db_config.site_name or "").strip() in OTHER_BOOKMAKER_SITES and not args.site_name:
+        print(
+            f"  note: ignored SITE_NAME={db_config.site_name!r} "
+            f"(using {site_name} for Fonbet)"
+        )
 
     run_poll(
         site_name=site_name,
         db_config=db_config,
         api_config=api_config,
-        appendix_path=Path(args.appendix),
+        appendix_path=appendix_path,
         init_schema_flag=args.init_schema,
         migrate_flag=args.migrate,
         max_iterations=max_iter,

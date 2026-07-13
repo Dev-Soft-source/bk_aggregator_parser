@@ -1,12 +1,24 @@
-import { getPool, siteName } from "./db";
+import { defaultSiteName, getPool } from "./db";
+import { KNOWN_SITES } from "./site";
 import {
   pickDefaultSportName,
   sortSportNames,
   sportDisplayLabel,
 } from "./sports";
-import type { DashboardStats, LiveMatch, OddsLine, SportCategory } from "./types";
+import type {
+  DashboardStats,
+  LiveMatch,
+  OddsLine,
+  SiteOption,
+  SportCategory,
+} from "./types";
 
 const SPORT_NAME_SQL = `CASE WHEN sp.reference_sport_id = 1 THEN 'Football' ELSE sp.name_en END`;
+const ALL_SITES = "all";
+
+function sqlSiteFilter(column: string): string {
+  return `($1::text = '${ALL_SITES}' OR ${column} = $1)`;
+}
 
 const SPORTS_SQL = `
 SELECT
@@ -15,14 +27,26 @@ SELECT
 FROM matches m
 JOIN sites st ON st.id = m.site_id
 JOIN sports sp ON sp.site_id = m.site_id AND sp.id = m.sport_id
-WHERE st.name = $1
+WHERE ${sqlSiteFilter("st.name")}
   AND ($2::text IS NULL OR m.place = $2)
 GROUP BY 1
 ORDER BY match_count DESC, sport_name ASC
 `;
 
+const SITES_SQL = `
+SELECT
+    st.name AS site_name,
+    COUNT(*)::int AS match_count
+FROM sites st
+LEFT JOIN matches m ON m.site_id = st.id
+  AND ($1::text IS NULL OR m.place = $1)
+GROUP BY st.id, st.name
+ORDER BY st.name ASC
+`;
+
 const MATCHES_SQL = `
 SELECT
+    st.name AS site_name,
     m.id AS match_id,
     m.team1,
     m.team2,
@@ -48,10 +72,11 @@ LEFT JOIN countries c ON c.id = l.country_id
 LEFT JOIN match_scores ms ON ms.site_id = m.site_id AND ms.match_id = m.id
 LEFT JOIN betting_status bs ON bs.site_id = m.site_id AND bs.match_id = m.id
 LEFT JOIN import_snapshots snap ON snap.id = m.snapshot_id
-WHERE st.name = $1
+WHERE ${sqlSiteFilter("st.name")}
   AND ($2::text IS NULL OR m.place = $2)
   AND ($4::text IS NULL OR ${SPORT_NAME_SQL} = $4)
 ORDER BY
+    st.name ASC,
     c.name ASC NULLS LAST,
     l.name ASC NULLS LAST,
     m.priority DESC NULLS LAST,
@@ -63,21 +88,21 @@ const STATS_SQL = `
 SELECT
     (SELECT COUNT(*)::int FROM matches m
      JOIN sites st ON st.id = m.site_id
-     WHERE st.name = $1 AND m.place = 'live') AS live_matches,
+     WHERE ${sqlSiteFilter("st.name")} AND m.place = 'live') AS live_matches,
     (SELECT COUNT(*)::int FROM odds_lines o
      JOIN sites st ON st.id = o.site_id
-     WHERE st.name = $1) AS total_odds,
+     WHERE ${sqlSiteFilter("st.name")}) AS total_odds,
     s.imported_at,
     s.packet_version
 FROM import_snapshots s
 JOIN sites st ON st.id = s.site_id
-WHERE st.name = $1
+WHERE ${sqlSiteFilter("st.name")}
 ORDER BY s.id DESC
 LIMIT 1
 `;
 
 function oddsFactorIds(): number[] {
-  const raw = process.env.ODDS_FACTOR_IDS ?? "921,923";
+  const raw = process.env.ODDS_FACTOR_IDS ?? "921,922,923";
   return raw.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !Number.isNaN(n));
 }
 
@@ -94,17 +119,31 @@ function sortOddsByConfig(lines: OddsLine[], factorIds: number[]): OddsLine[] {
     .filter((line): line is OddsLine => line !== undefined);
 }
 
-/** Prefer 921/923; fall back to other two-way winner markets (tennis, basketball, …). */
-function pickDisplayOdds(lines: OddsLine[]): OddsLine[] {
-  const factorIds = oddsFactorIds();
-  const configured = sortOddsByConfig(lines, factorIds);
-  if (configured.length >= 2) {
-    return configured.slice(0, 2);
+type MainOdds = {
+  odd1: number | null;
+  oddX: number | null;
+  odd2: number | null;
+};
+
+/** Prefer 1/X/2 (921/922/923); fall back to other two-way winner markets. */
+function pickDisplayOdds(lines: OddsLine[]): MainOdds {
+  const byFactor = new Map(lines.map((line) => [line.factorId, line.odds]));
+  if (byFactor.has(921) || byFactor.has(922) || byFactor.has(923)) {
+    return {
+      odd1: byFactor.get(921) ?? null,
+      oddX: byFactor.get(922) ?? null,
+      odd2: byFactor.get(923) ?? null,
+    };
   }
 
-  const by921923 = sortOddsByConfig(lines, [921, 923]);
-  if (by921923.length >= 2) {
-    return by921923;
+  const factorIds = oddsFactorIds().filter((id) => id !== 922);
+  const configured = sortOddsByConfig(lines, factorIds);
+  if (configured.length >= 2) {
+    return {
+      odd1: configured[0]?.odds ?? null,
+      oddX: null,
+      odd2: configured[1]?.odds ?? null,
+    };
   }
 
   const byMarket = new Map<string, OddsLine[]>();
@@ -131,16 +170,19 @@ function pickDisplayOdds(lines: OddsLine[]): OddsLine[] {
     });
 
   for (const [, group] of groups) {
-    const std = sortOddsByConfig(group, [921, 923]);
-    if (std.length >= 2) return std;
-    return group.slice(0, 2);
+    return {
+      odd1: group[0]?.odds ?? null,
+      oddX: null,
+      odd2: group[1]?.odds ?? null,
+    };
   }
 
-  return configured;
+  return { odd1: null, oddX: null, odd2: null };
 }
 
 const ODDS_FOR_MATCHES_SQL = `
 SELECT DISTINCT ON (o.match_id, o.factor_id, o.line_param)
+    st.name AS site_name,
     o.match_id,
     o.factor_id,
     o.odds::float8 AS odds,
@@ -150,7 +192,7 @@ SELECT DISTINCT ON (o.match_id, o.factor_id, o.line_param)
     o.line_param
 FROM odds_lines o
 JOIN sites st ON st.id = o.site_id
-WHERE st.name = $1
+WHERE ${sqlSiteFilter("st.name")}
   AND o.match_id = ANY($2::bigint[])
 ORDER BY o.match_id, o.factor_id, o.line_param,
     o.snapshot_id DESC NULLS LAST
@@ -158,10 +200,11 @@ ORDER BY o.match_id, o.factor_id, o.line_param,
 
 function mapMatch(
   row: Record<string, unknown>,
-  mainOdds: OddsLine[],
+  mainOdds: { odd1: number | null; oddX: number | null; odd2: number | null },
 ): LiveMatch {
   return {
     matchId: Number(row.match_id),
+    siteName: String(row.site_name),
     team1: row.team1 as string | null,
     team2: row.team2 as string | null,
     place: String(row.place),
@@ -181,8 +224,9 @@ function mapMatch(
       : null,
     scoreFunction: row.score_function as string | null,
     bettingState: row.betting_state as string | null,
-    odd1: mainOdds[0]?.odds ?? null,
-    odd2: mainOdds[1]?.odds ?? null,
+    odd1: mainOdds.odd1,
+    oddX: mainOdds.oddX,
+    odd2: mainOdds.odd2,
     lastUpdated: row.last_updated
       ? new Date(row.last_updated as string).toISOString()
       : null,
@@ -202,20 +246,42 @@ function mapOdds(row: Record<string, unknown>): OddsLine {
   };
 }
 
+function mergeKnownSites(
+  rows: Array<{ site_name: unknown; match_count: unknown }>,
+): SiteOption[] {
+  const counts = new Map(
+    rows.map((row) => [String(row.site_name), Number(row.match_count)]),
+  );
+
+  return KNOWN_SITES.map((site) => ({
+    siteName: site.siteName,
+    label: site.label,
+    matchCount: counts.get(site.siteName) ?? 0,
+  }));
+}
+
 export async function fetchLiveDashboard(
   place: string | null = "live",
   limit = 80,
   sportName: string | null = null,
+  siteName: string | null = null,
 ): Promise<{
   matches: LiveMatch[];
   sports: SportCategory[];
+  sites: SiteOption[];
   selectedSport: string | null;
+  selectedSite: string;
   stats: DashboardStats;
 }> {
   const pool = getPool();
-  const site = siteName();
+  const selectedSite = siteName && siteName.trim() ? siteName : defaultSiteName();
 
-  const sportsResult = await pool.query(SPORTS_SQL, [site, place]);
+  const [sitesResult, sportsResult] = await Promise.all([
+    pool.query(SITES_SQL, [place]),
+    pool.query(SPORTS_SQL, [selectedSite, place]),
+  ]);
+  const sites = mergeKnownSites(sitesResult.rows);
+
   const sports: SportCategory[] = sortSportNames(
     sportsResult.rows.map((row) => String(row.sport_name)),
   ).map((name) => {
@@ -233,8 +299,8 @@ export async function fetchLiveDashboard(
       : pickDefaultSportName(sports.map((s) => s.sportName));
 
   const [matchesResult, statsResult] = await Promise.all([
-    pool.query(MATCHES_SQL, [site, place, limit, selectedSport]),
-    pool.query(STATS_SQL, [site]),
+    pool.query(MATCHES_SQL, [selectedSite, place, limit, selectedSport]),
+    pool.query(STATS_SQL, [selectedSite]),
   ]);
 
   const statsRow = statsResult.rows[0];
@@ -250,23 +316,23 @@ export async function fetchLiveDashboard(
   };
 
   const matchIds = matchesResult.rows.map((r) => Number(r.match_id));
-  const oddsByMatch = new Map<number, OddsLine[]>();
+  const oddsByMatch = new Map<string, OddsLine[]>();
 
   if (matchIds.length > 0) {
-    const oddsResult = await pool.query(ODDS_FOR_MATCHES_SQL, [site, matchIds]);
+    const oddsResult = await pool.query(ODDS_FOR_MATCHES_SQL, [selectedSite, matchIds]);
     for (const row of oddsResult.rows) {
-      const matchId = Number(row.match_id);
-      const list = oddsByMatch.get(matchId) ?? [];
+      const key = `${String(row.site_name ?? selectedSite)}:${Number(row.match_id)}`;
+      const list = oddsByMatch.get(key) ?? [];
       list.push(mapOdds(row));
-      oddsByMatch.set(matchId, list);
+      oddsByMatch.set(key, list);
     }
   }
 
   const matches = matchesResult.rows.map((row) => {
-    const matchId = Number(row.match_id);
-    const picked = pickDisplayOdds(oddsByMatch.get(matchId) ?? []);
+    const key = `${String(row.site_name)}:${Number(row.match_id)}`;
+    const picked = pickDisplayOdds(oddsByMatch.get(key) ?? []);
     return mapMatch(row, picked);
   });
 
-  return { matches, sports, selectedSport, stats };
+  return { matches, sports, sites, selectedSport, selectedSite, stats };
 }

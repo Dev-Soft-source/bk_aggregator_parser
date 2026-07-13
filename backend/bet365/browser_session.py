@@ -37,11 +37,14 @@ _PREFERRED_COOKIE_NAMES: tuple[str, ...] = (
     "swt",
 )
 
-# Cookie consent banner (fresh bet365-chrome-debug profile)
+# Cookie consent banner (fresh bet365-chrome-debug profile) — "Accept all"
 _COOKIE_ACCEPT_LABELS: tuple[str, ...] = (
+    "Nõustu kõigiga",  # Estonian
     "Accept All",
-    "Essential Only",
     "Accept all",
+    "Alle akzeptieren",  # German
+    "Acceptez tout",  # French
+    "Aceptar todo",  # Spanish
 )
 
 
@@ -140,6 +143,8 @@ class Bet365BrowserSession:
         self._live_hub_opened = False
         self._cloudflare_notice_printed = False
         self._cloudflare_auto_click_attempts = 0
+        self._cookie_banner_seen_since: float | None = None
+        self._cookie_banner_notice_printed = False
 
     def _has_cf_clearance_cookie(self) -> bool:
         if self._context is None:
@@ -252,7 +257,9 @@ class Bet365BrowserSession:
             page.goto(live, wait_until="domcontentloaded", timeout=timeout_ms)
 
         self._live_hub_opened = True
-        self._dismiss_cookie_banner(page)
+        self._cookie_banner_seen_since = None
+        self._cookie_banner_notice_printed = False
+        self._maybe_dismiss_cookie_banner(page)
 
     def _wait_for_authentication(self, deadline: float) -> None:
         """Wait on entry URL until Cloudflare is cleared."""
@@ -308,6 +315,7 @@ class Bet365BrowserSession:
                     logger.info("Loading bet365 entry page … url=%s title=%r", url[:80], title)
                     last_countdown = now
 
+            self._maybe_dismiss_cookie_banner()
             self._page.wait_for_timeout(1000)
 
         url, title, _body = self._read_page_state()
@@ -351,6 +359,7 @@ class Bet365BrowserSession:
                 self._open_entry_page()
                 self._wait_for_authentication(auth_deadline)
                 self._navigate_to_live_hub()
+            self._maybe_dismiss_cookie_banner()
             self._page.wait_for_timeout(1000)
 
         url, title, body_text = self._read_page_state()
@@ -472,17 +481,69 @@ class Bet365BrowserSession:
                 return part.split("=", 1)[1]
         return None
 
-    def _dismiss_cookie_banner(self, page: Any) -> bool:
-        """Click bet365 cookie consent if visible (blocks ZAP on fresh profiles)."""
-        page.wait_for_timeout(400)
+    def _is_cookie_banner_visible(self, page: Any) -> bool:
         for label in _COOKIE_ACCEPT_LABELS:
             try:
-                page.get_by_role("button", name=label).click(timeout=2500)
+                if page.get_by_role("button", name=label).is_visible(timeout=200):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _click_cookie_accept(self, page: Any) -> bool:
+        for label in _COOKIE_ACCEPT_LABELS:
+            try:
+                button = page.get_by_role("button", name=label)
+                if not button.is_visible(timeout=500):
+                    continue
+                button.click(timeout=2500)
                 logger.info("Cookie banner dismissed (%s)", label)
                 page.wait_for_timeout(300)
                 return True
             except Exception:
                 continue
+        return False
+
+    def _maybe_dismiss_cookie_banner(self, page: Any | None = None) -> bool:
+        """
+        When the cookie consent bar is visible, wait then click Accept all.
+
+        Default delay is 5s (BET365_COOKIE_BANNER_DELAY_SECONDS).
+        """
+        if not self._config.cookie_banner_auto_click:
+            return False
+        page = page or self._page
+        if page is None:
+            return False
+
+        if not self._is_cookie_banner_visible(page):
+            self._cookie_banner_seen_since = None
+            self._cookie_banner_notice_printed = False
+            return False
+
+        delay = self._config.cookie_banner_auto_click_delay_seconds
+        if self._cookie_banner_seen_since is None:
+            self._cookie_banner_seen_since = time.monotonic()
+            if not self._cookie_banner_notice_printed:
+                self._cookie_banner_notice_printed = True
+                logger.info(
+                    "Cookie banner detected — auto-accept in %.0fs",
+                    delay,
+                )
+                print(
+                    f"Cookie banner detected — accepting all cookies in {delay:.0f}s …"
+                )
+            return False
+
+        elapsed = time.monotonic() - self._cookie_banner_seen_since
+        if elapsed < delay:
+            return False
+
+        if self._click_cookie_accept(page):
+            self._cookie_banner_seen_since = None
+            self._cookie_banner_notice_printed = False
+            print("Cookie banner accepted (Accept all).")
+            return True
         return False
 
     def _navigate_live(self, page: Any, url: str, timeout_ms: int) -> None:
@@ -495,7 +556,9 @@ class Bet365BrowserSession:
         else:
             logger.info("Opening %s …", url)
             page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
-        self._dismiss_cookie_banner(page)
+        self._cookie_banner_seen_since = None
+        self._cookie_banner_notice_printed = False
+        self._maybe_dismiss_cookie_banner(page)
 
     def _reload_if_needed(self) -> None:
         if not self._config.browser_auto_reload:
@@ -788,6 +851,7 @@ class Bet365BrowserSession:
                 frames.append(self._frame_queue.get(timeout=min(0.25, remaining)))
             except queue.Empty:
                 if self._page is not None:
+                    self._maybe_dismiss_cookie_banner()
                     self._page.wait_for_timeout(50)
                 continue
         return frames

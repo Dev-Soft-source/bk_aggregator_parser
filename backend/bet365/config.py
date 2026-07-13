@@ -28,6 +28,7 @@ DEFAULT_STALE_POLLS_SAFE = 6
 DEFAULT_STALE_POLLS = 3
 DEFAULT_CLOUDFLARE_WAIT_SECONDS = 300.0
 DEFAULT_CLOUDFLARE_AUTO_CLICK_DELAY = 30.0
+DEFAULT_COOKIE_BANNER_DELAY_SECONDS = 5.0
 DEFAULT_TOPICS = (
     "__host",
     "CONFIG_1_3",
@@ -105,6 +106,8 @@ class Bet365Config:
     cloudflare_wait_seconds: float
     cloudflare_auto_click: bool
     cloudflare_auto_click_delay_seconds: float
+    cookie_banner_auto_click: bool
+    cookie_banner_auto_click_delay_seconds: float
 
     @classmethod
     def from_env(cls) -> "Bet365Config":
@@ -154,6 +157,10 @@ class Bet365Config:
             "BET365_CLOUDFLARE_AUTO_CLICK_DELAY_SECONDS",
             str(DEFAULT_CLOUDFLARE_AUTO_CLICK_DELAY),
         ).strip()
+        cookie_banner_delay_raw = os.getenv(
+            "BET365_COOKIE_BANNER_DELAY_SECONDS",
+            str(DEFAULT_COOKIE_BANNER_DELAY_SECONDS),
+        ).strip()
 
         return cls(
             ws_url=build_zap_url(base, uid),
@@ -198,6 +205,10 @@ class Bet365Config:
             cloudflare_auto_click_delay_seconds=float(auto_click_delay_raw)
             if auto_click_delay_raw
             else DEFAULT_CLOUDFLARE_AUTO_CLICK_DELAY,
+            cookie_banner_auto_click=_env_bool("BET365_COOKIE_BANNER_AUTO_CLICK", True),
+            cookie_banner_auto_click_delay_seconds=float(cookie_banner_delay_raw)
+            if cookie_banner_delay_raw
+            else DEFAULT_COOKIE_BANNER_DELAY_SECONDS,
         )
 
     def ws_headers(self) -> list[tuple[str, str]]:

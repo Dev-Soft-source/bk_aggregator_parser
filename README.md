@@ -93,7 +93,8 @@ Run in two terminals:
 ```powershell
 # Terminal 1 — poll Fonbet live API → PostgreSQL
 cd backend
-python main.py poll
+python main.py poll fonbet
+# also works: python main.py poll
 
 # Terminal 2 — review UI
 cd frontend
@@ -108,7 +109,7 @@ All commands run from `backend/`:
 |---------|-------------|
 | `python main.py setup` | Phase 0: schema + sample import + verification |
 | `python main.py import <file.json>` | Import a Fonbet JSON packet (`--init-schema`, `--migrate` optional) |
-| `python main.py poll` | Poll Fonbet live API and write to PostgreSQL |
+| `python main.py poll fonbet` | Poll Fonbet live API and write to PostgreSQL |
 | `python main.py adapter <file.json>` | Map packet to `Change[]` without touching the DB |
 | `python main.py adapter --live --once` | Fetch one live packet and print changes |
 

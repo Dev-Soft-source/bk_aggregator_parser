@@ -4,6 +4,12 @@ export interface SportCategory {
   matchCount: number;
 }
 
+export interface SiteOption {
+  siteName: string;
+  label: string;
+  matchCount: number;
+}
+
 export interface OddsLine {
   factorId: number;
   odds: number;
@@ -16,6 +22,7 @@ export interface OddsLine {
 
 export interface LiveMatch {
   matchId: number;
+  siteName: string;
   team1: string | null;
   team2: string | null;
   place: string;
@@ -32,6 +39,7 @@ export interface LiveMatch {
   scoreFunction: string | null;
   bettingState: string | null;
   odd1: number | null;
+  oddX: number | null;
   odd2: number | null;
   lastUpdated: string | null;
 }
@@ -46,9 +54,10 @@ export interface DashboardStats {
 export interface MatchesResponse {
   matches: LiveMatch[];
   sports: SportCategory[];
+  sites: SiteOption[];
   selectedSport: string | null;
+  selectedSite: string;
   stats: DashboardStats;
   fetchedAt: string;
-  siteName: string;
-  pollCommand: string;
+  pollCommand: string | null;
 }

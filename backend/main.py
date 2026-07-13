@@ -20,8 +20,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "poll",
-        help="Poll bookmaker API (fonbet default, or ligastavok) — both import to PostgreSQL",
-        description="Poll bookmaker API — fonbet, ligastavok, or bet365 imports to PostgreSQL every ~3.5s.",
+        help=(
+            "Poll bookmaker API — fonbet, ligastavok, bet365, betcity, "
+            "betcity-line, lxbet-line, or lxbet-live"
+        ),
+        description=(
+            "Poll bookmaker API and import to PostgreSQL. "
+            "Usage: python main.py poll "
+            "[fonbet|ligastavok|bet365|betcity|betcity-line|lxbet-line|lxbet-live] ..."
+        ),
     )
     sub.add_parser(
         "adapter",
@@ -39,8 +46,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "listen",
-        help="Listen to bookmaker WebSocket (bet365 ZAP)",
-        description="Stream WebSocket frames — bet365 ZAP protocol.",
+        help="Listen to bookmaker WebSocket (bet365 ZAP, betcity live)",
+        description="Stream WebSocket frames — bet365 ZAP or betcity live socket.",
     )
     sub.add_parser(
         "capture",
@@ -96,13 +103,54 @@ def _run_import(argv: list[str]) -> None:
 
 
 def _run_poll(argv: list[str]) -> None:
-    if argv and argv[0] == "ligastavok":
+    bookmaker = (argv[0].lower() if argv else "fonbet")
+    # Accept common typo "fontbet".
+    if bookmaker in ("fonbet", "fontbet"):
+        rest = argv[1:] if argv and argv[0].lower() in ("fonbet", "fontbet") else argv
+        sys.argv = ["poll", *rest]
+        from fonbet.poll import main as poll_main
+    elif bookmaker == "ligastavok":
         sys.argv = ["poll", *argv[1:]]
         from ligastavok.poll import main as poll_main
-    elif argv and argv[0] == "bet365":
+    elif bookmaker == "bet365":
         sys.argv = ["poll", *argv[1:]]
         from bet365.poll import main as poll_main
+    elif bookmaker in ("betcity-line", "betcity_line", "betcityline"):
+        sys.argv = ["poll", *argv[1:]]
+        from betcity_line.poll import main as poll_main
+    elif bookmaker in (
+        "lxbet-line",
+        "lxbet_line",
+        "lxbetline",
+        "1xbet-line",
+        "1xbet_line",
+    ):
+        sys.argv = ["poll", *argv[1:]]
+        from lxbet_line.poll import main as poll_main
+    elif bookmaker in (
+        "lxbet-live",
+        "lxbet_live",
+        "lxbetlive",
+        "1xbet-live",
+        "1xbet_live",
+        "1xbet",
+        "lxbet",
+    ):
+        # Bare 1xbet/lxbet defaults to live (dashboard Live tab).
+        sys.argv = ["poll", *argv[1:]]
+        from lxbet_live.poll import main as poll_main
+    elif bookmaker == "betcity":
+        sys.argv = ["poll", *argv[1:]]
+        from betcity_live.poll import main as poll_main
+    elif argv and not argv[0].startswith("-"):
+        raise SystemExit(
+            "Usage: python main.py poll "
+            "[fonbet|ligastavok|bet365|betcity|betcity-line|lxbet-line|lxbet-live] "
+            "[options]\n"
+            f"Unknown bookmaker: {argv[0]!r}"
+        )
     else:
+        # Bare `poll --once` etc. → Fonbet (backward compatible).
         sys.argv = ["poll", *argv]
         from fonbet.poll import main as poll_main
 
@@ -139,12 +187,19 @@ def _run_capture(argv: list[str]) -> None:
 
 
 def _run_listen(argv: list[str]) -> None:
-    if not argv or argv[0] != "bet365":
+    if not argv or argv[0] not in ("bet365", "betcity"):
         raise SystemExit(
-            "Usage: python main.py listen bet365 [--browser] [--direct] [--seconds 60]"
+            "Usage: python main.py listen bet365 [--browser] [--direct] [--seconds 60]\n"
+            "       python main.py listen betcity [--browser] [--proxy host:port] "
+            "[--seconds 30] [--cookie ...] [--save]"
         )
-    sys.argv = ["listen", *argv[1:]]
-    from bet365.listen import main as listen_main
+    bookmaker = argv[0]
+    rest = argv[1:]
+    sys.argv = ["listen", *rest]
+    if bookmaker == "betcity":
+        from betcity_live.listen import main as listen_main
+    else:
+        from bet365.listen import main as listen_main
 
     listen_main()
 

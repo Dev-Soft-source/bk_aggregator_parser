@@ -10,7 +10,12 @@ import psycopg2.extras
 
 from config import DatabaseConfig
 from db import connect, init_schema, run_migration
-from fonbet.sports_reference import load_appendix_sports_en, resolve_name_en
+from fonbet.api import is_snapshot_packet
+from fonbet.sports_reference import (
+    load_appendix_sports_en,
+    resolve_appendix_path,
+    resolve_name_en,
+)
 from fonbet.parsers import (
     build_sport_prefixes,
     build_sports_maps,
@@ -25,7 +30,14 @@ from fonbet.parsers import (
     unix_to_datetime,
 )
 from fonbet.odds_config import allowed_factor_ids, factor_is_allowed
-from retention import current_utc_year, prune_snapshots, prune_stale_matches
+from retention import (
+    current_utc_year,
+    prune_absent_matches,
+    prune_orphan_catalog,
+    prune_snapshots,
+    prune_snapshots_to_current,
+    prune_stale_matches,
+)
 
 
 def load_packet(path: Path) -> dict[str, Any]:
@@ -48,8 +60,14 @@ def upsert_site(cur: psycopg2.extensions.cursor, name: str) -> int:
     return row[0]
 
 
-def seed_sport_reference(cur: psycopg2.extensions.cursor, appendix_path: Path) -> int:
-    appendix = load_appendix_sports_en(appendix_path)
+def seed_sport_reference(
+    cur: psycopg2.extensions.cursor,
+    appendix_path: Path | None = None,
+) -> int:
+    resolved = resolve_appendix_path(appendix_path)
+    if resolved is None:
+        return 0
+    appendix = load_appendix_sports_en(resolved)
     if not appendix:
         return 0
 
@@ -160,6 +178,8 @@ def import_packet(
     appendix_path: Path | None = None,
     retain_snapshot_years: int = 1,
     prune_matches_before_year: int | None = None,
+    *,
+    keep_current_only: bool = True,
 ) -> tuple[int, dict[str, int]]:
     sports = packet.get("sports", [])
     events = packet.get("events", [])
@@ -183,9 +203,15 @@ def import_packet(
         )
         snapshot_id = cur.fetchone()[0]
 
-        default_appendix = Path(__file__).resolve().parent / "Appendix_A_sports_EN.md"
-        reference_count = seed_sport_reference(cur, appendix_path or default_appendix)
-        appendix_names = load_appendix_sports_en(appendix_path)
+        resolved_appendix = resolve_appendix_path(appendix_path)
+        reference_count = seed_sport_reference(cur, resolved_appendix)
+        appendix_names = load_appendix_sports_en(resolved_appendix)
+        if reference_count == 0:
+            raise RuntimeError(
+                "sport_reference seed is empty — Appendix A not found. "
+                "Expected docs/Appendix_A_sports_EN.md or fonbet/Appendix_A_sports_EN.md "
+                "(or pass --appendix)."
+            )
 
         country_ids: dict[str, int] = {}
         sports_by_id, league_to_sport = build_sports_maps(sports)
@@ -493,9 +519,25 @@ def import_packet(
         retention = apply_retention(
             cur,
             site_id,
-            retain_snapshot_years,
-            prune_matches_before_year,
+            retain_snapshot_years=0 if keep_current_only else retain_snapshot_years,
+            prune_matches_before_year=prune_matches_before_year,
         )
+        matches_deleted = retention.get("matches_deleted", 0)
+        snapshots_deleted = retention.get("snapshots_deleted", 0)
+        leagues_deleted = 0
+        sports_deleted = 0
+
+        # Full listLight snapshot = current live set; drop finished matches.
+        if keep_current_only and is_snapshot_packet(packet) and match_ids:
+            removed = prune_absent_matches(cur, site_id, match_ids, place="live")
+            matches_deleted += removed
+            if removed:
+                orphans = prune_orphan_catalog(cur, site_id)
+                leagues_deleted = orphans.get("leagues_deleted", 0)
+                sports_deleted = orphans.get("sports_deleted", 0)
+
+        if keep_current_only:
+            snapshots_deleted += prune_snapshots_to_current(cur, site_id, snapshot_id)
 
     conn.commit()
     return snapshot_id, {
@@ -505,7 +547,10 @@ def import_packet(
         "matches": matches_inserted,
         "scores_updated": scores_updated,
         "odds_lines": len(odds_rows),
-        **retention,
+        "matches_deleted": matches_deleted,
+        "snapshots_deleted": snapshots_deleted,
+        "leagues_deleted": leagues_deleted,
+        "sports_deleted": sports_deleted,
     }
 
 
@@ -557,8 +602,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--appendix",
-        default=str(Path(__file__).resolve().parent / "Appendix_A_sports_EN.md"),
-        help="Path to Appendix A sports reference",
+        default=None,
+        help="Path to Appendix A sports reference (default: docs/ or fonbet/)",
     )
     parser.add_argument(
         "--retain-snapshot-years",
@@ -593,11 +638,19 @@ def main() -> None:
                 poll_interval=args.interval,
                 timeout=api_config.timeout,
             )
+        appendix_path = resolve_appendix_path(
+            Path(args.appendix) if args.appendix else None
+        )
+        if appendix_path is None:
+            raise SystemExit(
+                "Appendix A not found. Place Appendix_A_sports_EN.md under docs/ "
+                "or fonbet/, or pass --appendix PATH"
+            )
         run_poll(
             site_name=args.site_name or db_config.site_name,
             db_config=db_config,
             api_config=api_config,
-            appendix_path=Path(args.appendix),
+            appendix_path=appendix_path,
             init_schema_flag=args.init_schema,
             migrate_flag=args.migrate,
             max_iterations=2 if args.once else None,
@@ -629,7 +682,9 @@ def main() -> None:
                 raise SystemExit(f"Migration file not found: {migrate_path}")
             run_migration(conn, migrate_path)
 
-        appendix_path = Path(args.appendix)
+        appendix_path = resolve_appendix_path(
+            Path(args.appendix) if args.appendix else None
+        )
         snapshot_id, counts = import_packet(
             conn,
             packet,

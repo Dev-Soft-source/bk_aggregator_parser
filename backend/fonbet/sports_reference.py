@@ -55,11 +55,40 @@ _TABLE_ROW = re.compile(
     re.IGNORECASE,
 )
 
+_FONBET_DIR = Path(__file__).resolve().parent
+_REPO_DOCS_APPENDIX = _FONBET_DIR.parent.parent / "docs" / "Appendix_A_sports_EN.md"
+_LOCAL_APPENDIX = _FONBET_DIR / "Appendix_A_sports_EN.md"
+
+
+def resolve_appendix_path(path: Path | None = None) -> Path | None:
+    """
+    Locate Appendix A sports markdown.
+
+    Order: explicit path (if it exists) → fonbet/Appendix_A_sports_EN.md →
+    docs/Appendix_A_sports_EN.md.
+    """
+    candidates: list[Path] = []
+    if path is not None:
+        candidates.append(Path(path))
+    candidates.extend((_LOCAL_APPENDIX, _REPO_DOCS_APPENDIX))
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            key = candidate.resolve()
+        except OSError:
+            key = candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.exists():
+            return candidate
+    return None
+
 
 def load_appendix_sports_en(path: Path | None = None) -> dict[int, str]:
     """Parse Appendix_A_sports_EN.md -> {sport_id: name_en}."""
-    md_path = path or Path(__file__).resolve().parent / "Appendix_A_sports_EN.md"
-    if not md_path.exists():
+    md_path = resolve_appendix_path(path)
+    if md_path is None:
         return {}
 
     names: dict[int, str] = {}

@@ -1,27 +1,43 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { MatchList } from "@/components/MatchList";
 import { StatsBar } from "@/components/StatsBar";
 import { DEFAULT_SPORT_LABEL } from "@/lib/sports";
-import type { MatchesResponse } from "@/lib/types";
+import { KNOWN_SITES, siteLabel } from "@/lib/site";
+import type { LiveMatch, MatchesResponse, SiteOption } from "@/lib/types";
 
 const POLL_MS = Number(process.env.NEXT_PUBLIC_POLL_INTERVAL_MS ?? 3500);
 
 type PlaceFilter = "live" | "line" | "all";
+
+function matchesTeamSearch(match: LiveMatch, query: string): boolean {
+  const q = query.trim().toLocaleLowerCase();
+  if (!q) return true;
+  const haystack = [match.team1, match.team2, match.leagueName]
+    .filter(Boolean)
+    .join(" ")
+    .toLocaleLowerCase();
+  return haystack.includes(q);
+}
 
 export function Dashboard() {
   const [data, setData] = useState<MatchesResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [place, setPlace] = useState<PlaceFilter>("live");
+  const [userSite, setUserSite] = useState<string | null>(null);
   const [userSport, setUserSport] = useState<string | null>(null);
+  const [teamSearch, setTeamSearch] = useState("");
 
   const load = useCallback(async () => {
     setIsRefreshing(true);
     try {
       const params = new URLSearchParams({ place });
+      if (userSite) {
+        params.set("site", userSite);
+      }
       if (userSport) {
         params.set("sport", userSport);
       }
@@ -38,18 +54,46 @@ export function Dashboard() {
     } finally {
       setIsRefreshing(false);
     }
-  }, [place, userSport]);
+  }, [place, userSite, userSport]);
 
   useEffect(() => {
-    load();
+    const initial = window.setTimeout(() => {
+      void load();
+    }, 0);
     const id = setInterval(load, POLL_MS);
-    return () => clearInterval(id);
+    return () => {
+      window.clearTimeout(initial);
+      clearInterval(id);
+    };
   }, [load]);
 
+  const siteOptions: SiteOption[] =
+    data?.sites ??
+    KNOWN_SITES.map((site) => ({
+      siteName: site.siteName,
+      label: site.label,
+      matchCount: 0,
+    }));
+
+  const activeSite = userSite ?? data?.selectedSite ?? null;
   const activeSport = userSport ?? data?.selectedSport ?? null;
   const activeLabel =
     data?.sports.find((s) => s.sportName === activeSport)?.label ??
     DEFAULT_SPORT_LABEL;
+  const activeSiteLabel =
+    activeSite === "all"
+      ? "All sites"
+      : siteOptions.find((site) => site.siteName === activeSite)?.label ??
+        (activeSite ? siteLabel(activeSite) : "—");
+  const isAllSites = activeSite === "all";
+
+  const filteredMatches = useMemo(() => {
+    const matches = data?.matches ?? [];
+    if (!teamSearch.trim()) return matches;
+    return matches.filter((match) => matchesTeamSearch(match, teamSearch));
+  }, [data?.matches, teamSearch]);
+
+  const searchActive = Boolean(teamSearch.trim());
 
   return (
     <div className="space-y-6">
@@ -59,15 +103,65 @@ export function Dashboard() {
             Live sportsbook
           </h1>
           <p className="text-sm text-slate-400">
-            {activeLabel} · auto-refresh every {POLL_MS / 1000}s
+            {activeLabel} · {activeSiteLabel} · auto-refresh every {POLL_MS / 1000}s
+            {searchActive ? (
+              <>
+                {" "}
+                ·{" "}
+                <span className="text-slate-300">
+                  {filteredMatches.length} match
+                  {filteredMatches.length === 1 ? "" : "es"} for &quot;
+                  {teamSearch.trim()}&quot;
+                </span>
+              </>
+            ) : null}
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="relative">
+            <input
+              type="search"
+              value={teamSearch}
+              onChange={(event) => setTeamSearch(event.target.value)}
+              placeholder="Search team…"
+              aria-label="Search team"
+              className="w-44 rounded-lg border border-slate-700 bg-slate-900 py-1.5 pl-3 pr-8 text-sm text-slate-200 placeholder:text-slate-500 focus:border-amber-500/60 focus:outline-none focus:ring-1 focus:ring-amber-500/40 sm:w-56"
+            />
+            {teamSearch ? (
+              <button
+                type="button"
+                onClick={() => setTeamSearch("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300"
+                aria-label="Clear search"
+              >
+                ×
+              </button>
+            ) : null}
+          </div>
+          <select
+            value={activeSite ?? data?.selectedSite ?? KNOWN_SITES[0].siteName}
+            onChange={(event) => {
+              setUserSite(event.target.value);
+              setUserSport(null);
+            }}
+            className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm text-slate-200"
+            aria-label="Site"
+          >
+            <option value="all">All sites</option>
+            {siteOptions.map((site) => (
+              <option key={site.siteName} value={site.siteName}>
+                {site.label} ({site.matchCount})
+              </option>
+            ))}
+          </select>
           {(["live", "line", "all"] as const).map((p) => (
             <button
               key={p}
               type="button"
-              onClick={() => setPlace(p)}
+              onClick={() => {
+                setPlace(p);
+                setUserSport(null);
+              }}
               className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
                 place === p
                   ? "bg-amber-500 text-slate-950"
@@ -92,7 +186,7 @@ export function Dashboard() {
         <div className="rounded-xl border border-rose-800 bg-rose-950/50 p-4 text-rose-200">
           {error}
           <p className="mt-2 text-sm text-rose-300/80">
-            Check DATABASE_URL in frontend/.env.local and that the backend poller is
+            Check DATABASE_URL in frontend/.env.local and that the backend pollers are
             running.
           </p>
         </div>
@@ -106,7 +200,7 @@ export function Dashboard() {
               aria-label="Sports"
             >
               <div className="border-b border-slate-800 px-4 py-2.5 text-xs font-medium uppercase tracking-wide text-slate-500">
-                Sports
+                Sports {activeSiteLabel !== "—" ? `· ${activeSiteLabel}` : ""}
               </div>
               <ul className="max-h-[420px] overflow-y-auto p-2">
                 {data.sports.length === 0 ? (
@@ -149,26 +243,57 @@ export function Dashboard() {
               isRefreshing={isRefreshing}
             />
             {data.matches.length === 0 ? (
-              <p className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
-                No {activeLabel} matches for &quot;{place}&quot;.
-                {data.siteName ? (
-                  <>
-                    {" "}
-                    Site: <span className="text-slate-300">{data.siteName}</span>.
-                    Ensure{" "}
-                    <code className="text-amber-400/90">frontend/.env.local</code>{" "}
-                    <code className="text-amber-400/90">SITE_NAME</code> matches{" "}
-                    <code className="text-amber-400/90">backend/.env</code>, then run:
-                  </>
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
+                <p>
+                  No {activeLabel} matches for &quot;{place}&quot;.
+                  {activeSite ? (
+                    <>
+                      {" "}
+                      Site: <span className="text-slate-300">{activeSiteLabel}</span>.
+                      Ensure{" "}
+                      <code className="text-amber-400/90">frontend/.env.local</code>{" "}
+                      <code className="text-amber-400/90">DATABASE_URL</code> points to the
+                      shared database, then run:
+                    </>
+                  ) : (
+                    " Run the backend pollers:"
+                  )}
+                </p>
+                {data.pollCommand ? (
+                  <code className="mt-2 block text-amber-400">
+                    cd backend && {data.pollCommand}
+                  </code>
                 ) : (
-                  " Run the backend poller:"
+                  <div className="mt-2 space-y-1 text-amber-400">
+                    <code className="block">cd backend && python main.py poll</code>
+                    <code className="block">
+                      cd backend && python main.py poll ligastavok --browser
+                    </code>
+                    <code className="block">cd backend && python main.py poll bet365</code>
+                  </div>
                 )}
-                <code className="mt-2 block text-amber-400">
-                  cd backend && {data.pollCommand ?? "python main.py poll"}
-                </code>
-              </p>
+              </div>
+            ) : filteredMatches.length === 0 ? (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-8 text-center text-slate-400">
+                <p>
+                  No teams matching &quot;
+                  <span className="text-slate-200">{teamSearch.trim()}</span>
+                  &quot;.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setTeamSearch("")}
+                  className="mt-3 rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+                >
+                  Clear search
+                </button>
+              </div>
             ) : (
-              <MatchList matches={data.matches} singleSport />
+              <MatchList
+                matches={filteredMatches}
+                singleSport={!isAllSites}
+                paginationKey={`${place}|${activeSite ?? ""}|${activeSport ?? ""}|${teamSearch.trim().toLocaleLowerCase()}`}
+              />
             )}
           </div>
         </div>

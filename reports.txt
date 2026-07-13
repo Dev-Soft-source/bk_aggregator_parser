@@ -1,0 +1,660 @@
+================================================================================
+BK AGGREGATOR PARSER — DETAILED PROJECT REVIEW
+================================================================================
+Generated: 2026-07-09
+Repository: d:\Work\bk_aggregator_parser
+Reviewer: automated codebase analysis
+
+================================================================================
+1. EXECUTIVE SUMMARY
+================================================================================
+
+BK Aggregator Parser is a sportsbook line ingestion and review system. It fetches
+live/pre-match data from bookmaker APIs, normalizes it into a canonical Change[]
+model, persists it in PostgreSQL (database: booker_adapter), and displays it in
+a Next.js review dashboard.
+
+Current phase scope (per WORKFLOW.md / README):
+  - Parser adapters + CORE persistence + review frontend
+  - Exactly TWO odds per match (main 2-way line; default factors 921 + 923)
+  - Partner delivery (AMQP, multi-tenant HTTP API) is OUT OF SCOPE
+
+Maturity assessment:
+  - Phase A (Foundation): largely complete
+  - Phase B (Fonbet adapter): partially complete — mapper/tests exist; poll loop
+    still bypasses adapter stream and core ingestion
+  - Phase C (Core ingestion): started — core/apply_changes.py exists and is used
+    by Liga Stavok and Bet365, but NOT by Fonbet
+  - Phases D–G (URN mapping, core API, frontend enhancements, multi-site UI):
+    not started
+
+The project has evolved beyond the README's "Fonbet-only" description. Three
+bookmaker packages exist: fonbet, ligastavok, bet365.
+
+CRITICAL GAP: backend/schema.sql and backend/scripts/create_database.sql are
+referenced throughout docs and code but are NOT present in the repository
+(not tracked by git, not on disk). Fresh clones cannot run setup without them.
+
+================================================================================
+2. PROJECT PURPOSE & BUSINESS CONTEXT
+================================================================================
+
+Goal:
+  Build a reliable CORE layer that ingests bookmaker line data, stores canonical
+  match/score/odds state, and provides a UI to validate parsing quality before
+  building partner-facing delivery (RabbitMQ unified feed, HTTP API, etc.).
+
+Full client specification (future phases):
+  docs/TZ_bookmaker_parsing_COMPLETE_EN.md (gitignored locally, exists on disk)
+
+Key design rule (target architecture):
+  Adapters emit Change[]; CORE is the only writer to PostgreSQL.
+  Adapters must NOT write SQL directly.
+
+Odds scope constraint:
+  Only 2 outcomes per match are ingested and displayed (e.g. Home/Away on main
+  line). Full market trees (~1206 markets in Appendix C) are deferred.
+
+================================================================================
+3. TECHNOLOGY STACK
+================================================================================
+
+Backend:
+  - Python 3.11+ (3.13 tested per README)
+  - psycopg2-binary — PostgreSQL
+  - python-dotenv — configuration
+  - requests — HTTP (Fonbet, Liga Stavok)
+  - websocket-client, websockets — Liga Stavok WS, Bet365 ZAP
+  - playwright — browser automation for anti-bot bypass (Liga Stavok, Bet365)
+
+Frontend:
+  - Next.js 16.2.6 (App Router)
+  - React 19.2.4
+  - TypeScript 5
+  - Tailwind CSS 4
+  - pg (node-postgres) — direct DB queries from API routes
+
+Database:
+  - PostgreSQL 14+
+  - Database name: booker_adapter
+
+Infrastructure / DevOps:
+  - No CI/CD pipeline detected
+  - No Docker configuration
+  - No license file
+  - PowerShell helper scripts for Chrome CDP (Liga Stavok port 9222, Bet365 9223)
+
+================================================================================
+4. HIGH-LEVEL ARCHITECTURE
+================================================================================
+
+Target data flow (from WORKFLOW.md):
+
+  Bookmaker API/WS
+       │
+       ▼
+  Adapter layer (per bookmaker: fonbet/, ligastavok/, bet365/)
+       │  map packet → Change[] (fixture, score, betting_status, odds)
+       ▼
+  Core layer (backend/core/)
+       │  apply changes idempotently to PostgreSQL
+       ▼
+  PostgreSQL (booker_adapter)
+       │
+       ▼
+  Review frontend (Next.js)
+       │  polls GET /api/matches every ~3.5–5s
+       ▼
+  Developer validates parsing quality
+
+ACTUAL data flow today (varies by bookmaker):
+
+  Fonbet:
+    api.py → poll.py → fonbet/importer.py (legacy SQL) → PostgreSQL
+    Adapter/mapper exists but poll path does NOT use it.
+
+  Liga Stavok:
+    adapter → mapper → Change[] → core/apply_changes.py → PostgreSQL
+
+  Bet365:
+    browser CDP tap → ZAP parse → Change[] → core/apply_changes.py → PostgreSQL
+
+================================================================================
+5. REPOSITORY STRUCTURE
+================================================================================
+
+Tracked files: ~98 (git ls-files)
+
+bk_aggregator_parser/
+├── README.md                    Main project documentation
+├── reports.txt                  This review (generated)
+├── backend/
+│   ├── main.py                  Unified CLI entry point
+│   ├── config.py                DatabaseConfig (+ re-exports FonbetApiConfig)
+│   ├── db.py                    PostgreSQL connection, schema init helpers
+│   ├── retention.py             Snapshot/match pruning utilities
+│   ├── requirements.txt         Python dependencies
+│   ├── .env.example             Environment template (all 3 bookmakers)
+│   ├── adapters/
+│   │   └── base.py              Change DTOs, BookmakerAdapter protocol
+│   ├── core/
+│   │   ├── __init__.py
+│   │   └── apply_changes.py     Shared Change[] → PostgreSQL writer
+│   ├── fonbet/                  Fonbet HTTP adapter (most mature)
+│   ├── ligastavok/              Liga Stavok HTTP + optional WS
+│   ├── bet365/                  Bet365 ZAP WebSocket via browser CDP
+│   └── scripts/
+│       ├── phase0_setup.py      One-command DB bootstrap
+│       ├── setup_phase0.ps1
+│       ├── start_chrome_cdp.ps1
+│       └── start_chrome_cdp_bet365.ps1
+├── frontend/
+│   └── src/
+│       ├── app/                 Next.js App Router (page + API route)
+│       ├── components/          Dashboard, MatchList, StatsBar
+│       └── lib/                 DB, queries, types, sports helpers
+└── docs/                        Mix of tracked and gitignored files
+
+MISSING from repository (referenced but absent):
+  - backend/schema.sql
+  - backend/schema_migrate.sql
+  - backend/scripts/create_database.sql
+  - backend/fonbet/Appendix_A_sports_EN.md (referenced by importer/setup)
+
+Untracked local files (per git status):
+  - docs/BookmakerParser_Design_Workflow-1.docx
+  - docs/BookmakerParser_Weekly_Plan.docx
+  - docs/answer of bookmark.docx
+
+Gitignored but present locally (not in version control):
+  - docs/WORKFLOW.md, docs/TODO.md, docs/DATABASE.md, docs/REVIEW.md
+  - docs/TZ_bookmaker_parsing_COMPLETE_EN.md
+  - docs/Appendix_A_sports_EN.md, docs/Appendix_C_markets_EN.md
+
+================================================================================
+6. SHARED ADAPTER CONTRACT (backend/adapters/base.py)
+================================================================================
+
+Change types:
+  - fixture        — match metadata (teams, league, start time, place)
+  - score          — live score, timer, raw score breakdown
+  - betting_status — blocked/unblocked/partial
+  - odds           — market outcomes with factor_id and price
+
+Key DTOs:
+  - SportRef, TournamentRef, EventRef
+  - OddsOutcome, OddsMarket
+  - Change (change_type, match_payload_id, packet_version, payload)
+  - HealthStatus, PacketSummary
+
+BookmakerAdapter protocol methods:
+  - discover_sports / discover_tournaments / discover_events
+  - map_packet_to_changes
+  - packet_summary
+  - stream_live_changes
+  - health
+
+All three bookmaker adapters implement this contract (FonbetAdapter,
+LigastavokAdapter, Bet365Adapter).
+
+================================================================================
+7. BOOKMAKER ADAPTERS — DETAILED REVIEW
+================================================================================
+
+------------------------------------------------------------------------------
+7.1 FONBET (backend/fonbet/) — Primary / most documented
+------------------------------------------------------------------------------
+
+API pattern:
+  GET listLight?place=live&scopeMarket=1600  → full snapshot
+  GET list?version={packetVersion}           → delta updates
+
+Key modules:
+  api.py       — HTTP fetch, packet_version extraction
+  mapper.py    — JSON → Change[] (sports, events, scores, odds)
+  adapter.py   — stream_live_changes, health metrics, resilient polling
+  parsers.py   — sport tree resolution, line param normalization
+  importer.py  — LEGACY direct SQL import (~660 lines, duplicates core logic)
+  poll.py      — live loop; calls importer.import_packet() directly
+  odds_config.py — enforces exactly 2 factor IDs (default 921, 923)
+  sports_reference.py — Appendix A sport name resolution
+  run_adapter.py — CLI adapter debug (no DB)
+  test.json    — sample packet for offline testing
+
+Strengths:
+  - Clean mapper with unit tests (6 tests, all passing)
+  - Two-odds filter implemented and tested (test_odds_at_most_two_per_match)
+  - Resilient poll resets to listLight on error
+  - Sports reference mapping with football display override
+
+Gaps:
+  - poll.py does NOT use FonbetAdapter.stream_live_changes_resilient()
+  - poll.py does NOT use core/apply_changes.py
+  - Duplicate persistence logic in importer.py vs core/apply_changes.py
+  - No golden listLight fixture in fonbet/tests/fixtures/ (Phase B task)
+  - schema.sql missing — setup cannot run on fresh clone
+
+CLI:
+  python main.py poll              (default Fonbet)
+  python main.py import file.json
+  python main.py adapter file.json
+  python main.py adapter --live --once
+  python main.py setup
+
+------------------------------------------------------------------------------
+7.2 LIGA STAVOK (backend/ligastavok/) — Second bookmaker, production-oriented
+------------------------------------------------------------------------------
+
+API pattern:
+  POST …/rest/events/v8/eventsList — paginated HTTP snapshot
+  WSS …/ws — optional JSON-RPC patches (debug only, not in poll loop)
+
+Anti-bot:
+  Qrator protection requires session cookies. Playwright or CDP-attached Chrome
+  recommended. capture.curl file supported for header replay.
+
+Key modules:
+  adapter.py, mapper.py, api.py, poll.py, patch.py, browser_session.py
+  snapshot_body.py — request body serialization
+  ligastavok.json — sample snapshot fixture
+
+Data flow:
+  Adapter → Change[] → core/apply_changes.py → PostgreSQL
+  (Follows target architecture)
+
+Strengths:
+  - Uses shared core writer
+  - Comprehensive tests (26 tests across api, mapper, config, browser, snapshot)
+  - Well-documented README with CDP setup instructions
+  - Paginated multi-sport live fetch (LIGASTAVOK_LIVE_ALL_SPORTS)
+
+Gaps:
+  - 1 failing test: test_default_range_9_15 (expected lo=15, got 12) — config
+    default for browser refresh range may have changed without updating test
+  - WebSocket delta path not merged into production poll loop
+  - Requires manual Chrome CDP setup for reliable operation
+  - Depends on capture.curl or Playwright for Qrator cookies
+
+CLI:
+  python main.py poll ligastavok [--browser]
+  python main.py adapter ligastavok [file.json]
+  python main.py fetch ligastavok [--ns live|prematch]
+
+------------------------------------------------------------------------------
+7.3 BET365 (backend/bet365/) — Experimental / browser-dependent
+------------------------------------------------------------------------------
+
+API pattern:
+  wss://premws-pt1.365lpodds.com/zap/?uid={random}
+  Proprietary ZAP binary/text protocol; requires pstk cookie + browser session
+
+Key modules:
+  adapter.py     — accumulates ZAP frames between poll ticks
+  zap_parse.py   — protocol parser, fractional odds conversion
+  state.py       — incremental feed state (ZapFeedState)
+  browser_session.py — CDP Chrome frame tap
+  cloudflare_gate.py — Cloudflare/Turnstile detection
+  capture_session.py — auto-capture uid + cookie from browser
+  listen.py      — debug WebSocket listener
+  mapper.py      — state → Change[]
+
+Data flow:
+  Browser CDP tap → ZAP frames → state → Change[] → core/apply_changes.py
+
+Strengths:
+  - 17 unit tests, all passing (protocol parse, Cloudflare gate, multi-sport)
+  - Safe mode with configurable recovery/reload behavior
+  - Maps tennis 2-way and soccer 1X2 to normalized 921/923 factor slots
+  - Cloudflare wait/auto-click support
+
+Gaps:
+  - Fully dependent on live browser session (fragile for automation)
+  - Not suitable for headless server deployment without CDP Chrome
+  - Separate Chrome port (9223) from Liga Stavok (9222)
+  - bet365/tests/ lacks __init__.py — not discovered by `unittest discover -s .`
+  - Most complex operational setup of the three adapters
+
+CLI:
+  python main.py poll bet365
+  python main.py listen bet365 [--browser] [--seconds N]
+  python main.py capture bet365 [--env]
+
+================================================================================
+8. CORE LAYER (backend/core/)
+================================================================================
+
+Current state: MINIMAL — single module apply_changes.py (~348 lines)
+
+What it does:
+  - Groups Change[] by match_payload_id
+  - Upserts: sites, countries, sports, leagues, matches
+  - Upserts: match_scores, betting_status, odds_lines
+  - Normalizes Liga Stavok factor IDs to 921/923 slots for frontend compatibility
+  - Prunes old snapshots and stale matches via retention.py
+  - Records import_snapshots audit row per tick
+
+What is missing (per WORKFLOW Phase C–E):
+  - core/ingest.py orchestrator
+  - core/handlers/ per ChangeType (fixture, score, betting_status, odds)
+  - core/models.py
+  - core/tests/ (idempotency, max-2-odds enforcement at DB level)
+  - core/api/ read-only HTTP API for frontend
+  - URN assignment (sr:match:*, sr:sport:N)
+  - factor_id → market_id mapping
+  - urn_map table
+
+Technical debt:
+  - apply_changes.py imports from fonbet.parsers (couples core to Fonbet)
+  - Fonbet poll path still uses fonbet/importer.py instead of core
+  - Two parallel write paths with duplicated upsert SQL
+
+================================================================================
+9. DATABASE LAYER
+================================================================================
+
+Expected tables (per docs/DATABASE.md):
+  sites, sport_reference, sports, countries, leagues, matches,
+  match_scores, betting_status, odds_lines, import_snapshots
+
+Schema files:
+  backend/schema.sql         — NOT IN REPO (critical)
+  backend/schema_migrate.sql — NOT IN REPO
+
+Connection:
+  config.DatabaseConfig.from_env() reads DATABASE_URL or DB_* vars
+  Default dbname: booker_adapter
+
+Retention:
+  RETAIN_SNAPSHOT_YEARS=1 (default) — prunes old import_snapshots
+  Optional prune_matches_before_year for stale match cleanup
+
+Multi-tenancy model:
+  All tables keyed by site_id (bookmaker domain in sites.name)
+  Frontend filters by SITE_NAME env var (one site at a time)
+
+VERIFICATION: Cannot verify schema DDL, indexes, or constraints without
+schema.sql. This blocks thorough database design review.
+
+================================================================================
+10. FRONTEND (frontend/)
+================================================================================
+
+Stack: Next.js 16 App Router, React 19, Tailwind 4, TypeScript
+
+Pages / routes:
+  /                           — Dashboard (page.tsx)
+  /api/matches                — Read-only API (direct PostgreSQL queries)
+
+Components:
+  Dashboard.tsx   — place filter (live/line/all), sport tabs, auto-refresh
+  MatchList.tsx   — sortable table, live timer, odds highlight on change
+  StatsBar.tsx    — live match count, total odds, last snapshot time
+
+Key lib modules:
+  queries.ts  — SQL for matches, sports, stats, odds (complex pickDisplayOdds)
+  db.ts       — pg Pool, siteName()
+  site.ts     — poll command hints per bookmaker
+  liveTimer.ts — client-side timer extrapolation
+  sports.ts   — sport display labels, default sport selection
+
+Architecture note:
+  Frontend queries PostgreSQL DIRECTLY (not through a core HTTP API).
+  This is acknowledged as transitional in WORKFLOW.md Phase E.
+
+Features present:
+  - Live / line / all place filters
+  - Sport category tabs with match counts
+  - Two odds columns (odd1, odd2) with up/down highlight animation
+  - Live score and timer display
+  - Betting state coloring (unblocked/blocked/partial)
+  - Poll interval configurable (default 3500ms in Dashboard, 5000ms in README)
+  - Shows backend poll command hint for configured site
+
+Features missing (per WORKFLOW Phase F):
+  - Site selector / multi-bookmaker switcher
+  - Match detail page (/matches/[id])
+  - URN / market_id / mapping status display
+  - Stale-data and adapter health indicators
+  - CSV export
+
+Frontend env:
+  DATABASE_URL (required)
+  SITE_NAME (default fonbet.com)
+  ODDS_FACTOR_IDS (default 921,923)
+  NEXT_PUBLIC_POLL_INTERVAL_MS
+
+================================================================================
+11. CLI REFERENCE (backend/main.py)
+================================================================================
+
+Command          | Description
+-----------------|------------------------------------------------------------
+setup            | Phase 0: create DB, apply schema, import test.json, verify
+import           | Import Fonbet JSON file to PostgreSQL
+poll             | Poll live API → DB (fonbet default; ligastavok; bet365)
+adapter          | Map packet to Change[] without DB (fonbet; ligastavok)
+fetch            | Download Liga Stavok snapshot JSON
+listen           | Stream Bet365 ZAP WebSocket frames (debug)
+capture          | Capture Bet365 uid + cookie from browser CDP
+
+Legacy shortcuts:
+  python main.py file.json     → import
+  python main.py --poll        → poll
+
+================================================================================
+12. TESTING STATUS
+================================================================================
+
+Test execution (2026-07-09):
+
+  python -m unittest discover -s . -p "test_*.py"
+    → 34 tests, 1 failure (ligastavok test_config test_default_range_9_15)
+
+  python -m unittest discover -s bet365/tests
+    → 17 tests, all passing
+
+Total: 51 tests, 50 passing, 1 failing
+
+Coverage by package:
+  fonbet/tests/       8 tests  — mapper, sports_reference (PASS)
+  ligastavok/tests/  26 tests  — api, mapper, config, browser, snapshot (1 FAIL)
+  bet365/tests/      17 tests  — zap_parse, cloudflare_gate (PASS, separate discover)
+
+Missing test areas:
+  - core/apply_changes.py — no tests
+  - fonbet/importer.py — no tests
+  - fonbet/poll.py — no integration tests
+  - frontend — no tests
+  - end-to-end poll → DB → API flow
+
+================================================================================
+13. DOCUMENTATION STATUS
+================================================================================
+
+Document                              | In Git | Quality
+--------------------------------------|--------|----------------------------------
+README.md                             | Yes    | Good overview; slightly outdated
+                                      |        | (says Fonbet-only; 3 adapters exist)
+backend/fonbet/README.md              | Yes    | Solid API/field mapping docs
+backend/ligastavok/README.md          | Yes    | Excellent operational guide
+backend/bet365/README.md              | Yes    | Good CDP/capture workflow
+frontend/README.md                    | Yes    | Basic setup
+docs/DATABASE.md                      | No*    | Good but references missing schema
+docs/WORKFLOW.md                      | No*    | Comprehensive phase plan
+docs/TODO.md                          | No*    | Executable checklist
+docs/REVIEW.md                        | No*    | Onboarding walkthrough
+docs/TZ_..._COMPLETE_EN.md            | No*    | Full client spec (reference)
+docs/Bet365 Odds Collector...md       | Yes    | Enterprise architecture notes
+
+* Gitignored — exists locally but not version-controlled
+
+Documentation inconsistencies:
+  - TODO.md mentions factors 921,922 in some places; code uses 921,923
+  - WORKFLOW.md mentions 921+922; odds_config.py explicitly rejects 922 (draw)
+  - README project structure lists schema.sql; file absent from repo
+  - .gitignore typo: backend/fontbet/__pycache__ (should be fonbet)
+
+================================================================================
+14. DEVELOPMENT PHASES — PROGRESS TRACKER
+================================================================================
+
+Phase | Name                    | Status      | Notes
+------|-------------------------|-------------|-------------------------------
+  A   | Foundation              | ~DONE       | Schema, poll, UI, CLI exist
+  B   | Fonbet adapter complete | PARTIAL     | Mapper/tests OK; poll not wired
+  C   | Core ingestion          | PARTIAL     | apply_changes for LS/B365 only
+  D   | Identity & mapping      | NOT STARTED | No URN, no market_id map
+  E   | Core read API           | NOT STARTED | Frontend hits DB directly
+  F   | Review frontend         | PARTIAL     | List view OK; no detail/multi-site
+  G   | Second bookmaker        | DONE+       | 2 extra sites (LS, B365) added
+
+================================================================================
+15. ISSUES, RISKS & TECHNICAL DEBT
+================================================================================
+
+CRITICAL:
+  [C1] schema.sql missing from repository — blocks fresh setup and schema review
+  [C2] Dual write paths: fonbet/importer.py vs core/apply_changes.py
+
+HIGH:
+  [H1] Core layer imports fonbet.parsers — wrong dependency direction
+  [H2] Key docs (WORKFLOW, TODO, DATABASE, TZ) gitignored — knowledge not shared
+  [H3] No CI/CD — regressions only caught by manual test runs
+  [H4] Liga Stavok / Bet365 require browser CDP — hard to deploy headless
+  [H5] Frontend couples directly to PostgreSQL schema — fragile during migrations
+
+MEDIUM:
+  [M1] Fonbet poll bypasses adapter abstraction (Phase B incomplete)
+  [M2] 1 failing unit test (ligastavok config default range)
+  [M3] bet365 tests not in default unittest discover path
+  [M4] No core/ tests for apply_changes idempotency
+  [M5] README outdated (single bookmaker focus)
+  [M6] No license specified
+  [M7] capture.curl committed to repo (may contain session artifacts)
+
+LOW:
+  [L1] .gitignore typo (fontbet vs fonbet)
+  [L2] Poll interval docs inconsistent (3.5s vs 5s)
+  [L3] No Docker/devcontainer for reproducible environment
+  [L4] No frontend tests or lint CI
+
+================================================================================
+16. SECURITY NOTES
+================================================================================
+
+  - .env and .env.local are gitignored (good)
+  - backend/.env exists locally (not committed)
+  - capture.curl is tracked — verify it contains no live session secrets
+  - Bet365/Liga Stavok cookies (pstk, qrator_jsid2) are sensitive; stored in .env
+  - Frontend DATABASE_URL grants direct DB access from Next.js server
+  - No authentication on /api/matches (acceptable for local review tool)
+  - Playwright browser profiles (.liga_browser_profile/) gitignored
+
+================================================================================
+17. RECOMMENDATIONS (PRIORITIZED)
+================================================================================
+
+Immediate (before further development):
+  1. Restore/commit backend/schema.sql and schema_migrate.sql to the repository
+  2. Restore backend/scripts/create_database.sql or update docs to match reality
+  3. Un-gitignore core docs (WORKFLOW.md, TODO.md, DATABASE.md) or ensure they
+     are tracked under a docs/ path that is committed
+  4. Fix failing ligastavok test (test_default_range_9_15)
+
+Short term (Phase B + C completion):
+  5. Refactor fonbet/poll.py to use FonbetAdapter + core/apply_changes.py
+  6. Deprecate duplicate SQL in fonbet/importer.py (keep only for JSON bootstrap)
+  7. Extract shared parsers from fonbet.parsers into core/ or adapters/
+  8. Add core/tests/ for apply_changes (idempotency, 2-odds cap)
+  9. Add bet365/tests/__init__.py so all tests run with one discover command
+  10. Add golden listLight.json fixture for Fonbet (Phase B.1)
+
+Medium term (Phases D–F):
+  11. Implement urn_map and factor_id → market_id mapping
+  12. Build core read API; thin Next.js proxy instead of raw SQL
+  13. Add SiteSelector and match detail page to frontend
+  14. Add GitHub Actions: unittest + eslint on PR
+
+Long term:
+  15. Abstract browser CDP dependency for anti-bot bookmakers
+  16. Design delivery layer (AMQP) once CORE milestone is stable
+
+================================================================================
+18. REVIEWER QUICK START
+================================================================================
+
+Prerequisites: Python 3.11+, Node 20+, PostgreSQL 14+, .env configured
+
+Without database (adapter debug only):
+  cd backend
+  pip install -r requirements.txt
+  python main.py adapter fonbet/test.json
+  python -m unittest discover -s fonbet/tests -v
+  python -m unittest discover -s ligastavok/tests -v
+  python -m unittest discover -s bet365/tests -v
+
+With database (requires schema.sql — currently missing):
+  cd backend
+  python main.py setup                    # will fail without schema.sql
+  python main.py poll                     # Fonbet
+  python main.py poll ligastavok --browser
+  python main.py poll bet365
+
+Frontend:
+  cd frontend
+  npm install
+  npm run dev
+  # http://localhost:3000
+
+Key files to read first:
+  backend/adapters/base.py      — domain model
+  backend/fonbet/mapper.py      — normalization logic
+  backend/core/apply_changes.py — persistence
+  frontend/src/lib/queries.ts   — what the UI shows
+  docs/WORKFLOW.md              — roadmap (local only)
+
+================================================================================
+19. FILE INVENTORY SUMMARY
+================================================================================
+
+Backend Python modules:  ~55 files
+Frontend TS/TSX:         13 files
+Test files:              9 files (51 test cases)
+Config/examples:         .env.example, .env.local.example
+Scripts:                 4 PowerShell/Python setup scripts
+Documentation:           README + 3 adapter READMEs + local docs/
+
+Dependencies (backend/requirements.txt):
+  psycopg2-binary>=2.9.9
+  python-dotenv>=1.0.1
+  requests>=2.31.0
+  websocket-client>=1.6.0
+  websockets>=12.0
+  playwright>=1.40.0
+
+Dependencies (frontend/package.json):
+  next 16.2.6, react 19.2.4, pg 8.21.0, tailwindcss 4
+
+================================================================================
+20. CONCLUSION
+================================================================================
+
+BK Aggregator Parser is a well-structured, actively developed bookmaker line
+ingestion system with a clear architectural vision (adapter → Change[] → core →
+DB → review UI). The shared adapter contract is solid, and the project has
+already expanded to three bookmakers with meaningful test coverage.
+
+The main gaps are:
+  (1) missing database schema in version control,
+  (2) incomplete migration from legacy Fonbet importer to core ingestion,
+  (3) frontend and docs ahead/behind git tracking,
+  (4) operational complexity for browser-dependent adapters.
+
+For a detailed code review session, start with the adapter contract, compare
+fonbet/importer.py vs core/apply_changes.py side by side, then trace one poll
+tick through ligastavok (the cleanest path) and the frontend queries that
+render the result.
+
+================================================================================
+END OF REPORT
+================================================================================

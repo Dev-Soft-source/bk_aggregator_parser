@@ -30,6 +30,7 @@ venv/
 .venv/
 env/
 ENV/
+docs/
 
 # --- Node / Next.js ---
 node_modules/
@@ -74,3 +75,10 @@ backend/python
 
 # Local Odds-API.io scratch output
 odds_all_sports.json
+
+# Betcity captured WS frames (can be large)
+backend/betcity_live/samples/
+backend/betcity_live/samples_rich/
+backend/betcity_live/_structure.txt
+backend/betcity_live/_score*.json
+backend/betcity_live/_best_event.json

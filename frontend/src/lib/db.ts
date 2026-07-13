@@ -17,6 +17,6 @@ export function getPool() {
   return globalForPg.pgPool;
 }
 
-export function siteName() {
+export function defaultSiteName() {
   return process.env.SITE_NAME ?? "fonbet.com";
 }

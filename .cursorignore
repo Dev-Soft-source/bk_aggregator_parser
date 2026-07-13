@@ -1,0 +1,13 @@
+﻿# Reduce Cursor indexing load (helps stability on Windows)
+backend/venv/
+backend/__pycache__/
+backend/.liga_browser_profile/
+frontend/node_modules/
+frontend/.next/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+reports.txt
+docs/*.docx

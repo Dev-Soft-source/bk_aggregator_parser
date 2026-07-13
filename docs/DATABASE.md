@@ -103,7 +103,12 @@ Or start fresh on `booker_adapter` and re-run `main.py poll`.
 
 ## 6. Maintenance
 
+Each Betcity poll keeps **only current live matches** for `betcity.ru` (events no longer in the live catalog are deleted; child odds/scores cascade). Import snapshots collapse to the latest one per poll.
+
 ```sql
+-- Manual: keep only newest snapshot rows (example)
+-- Prefer: python main.py poll betcity --once
+
 -- Prune old audit snapshots (example: before 2026)
 DELETE FROM import_snapshots WHERE year < 2026;
 

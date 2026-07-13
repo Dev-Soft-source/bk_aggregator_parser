@@ -42,7 +42,7 @@ python main.py setup
 python main.py import fonbet/test.json --init-schema
 
 # Poll live API → PostgreSQL
-python main.py poll
+python main.py poll fonbet
 
 # Adapter (map packet, no DB)
 python main.py adapter fonbet/test.json
@@ -52,6 +52,13 @@ python main.py adapter --live --once
 python main.py fonbet/test.json          # same as import
 python main.py --poll                    # same as poll (legacy)
 ```
+
+## Retention
+
+Live poll keeps **current data only**:
+
+- On each full `listLight` snapshot, live matches no longer in the feed are deleted
+- Import snapshots collapse to the latest one (no historical pile-up)
 
 ## Module layout
 

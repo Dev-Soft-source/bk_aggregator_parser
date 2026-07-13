@@ -85,6 +85,10 @@ class Bet365Adapter:
                         threshold,
                     )
 
+        dropped = self._state.drop_finished_events()
+        if dropped:
+            logger.info("Dropped %s finished Bet365 events from live state", dropped)
+
         version = int(time.time())
         changes = map_state_to_changes(
             self._state,

@@ -53,6 +53,9 @@ class EventState:
     sport_class: int | None = None
     score: str | None = None
     minute: int | None = None
+    timer_secs: int | None = None
+    timer_ticking: bool | None = None
+    timer_tu: str | None = None
     live: bool = False
     team1: str | None = None
     team2: str | None = None
@@ -141,8 +144,14 @@ class ZapFeedState:
             event.sport_class = sport_class
         if fields.get("SS"):
             event.score = fields["SS"]
-        if fields.get("TM"):
+        if fields.get("TM") is not None:
             event.minute = field_int(fields, "TM")
+        if fields.get("TS") is not None:
+            event.timer_secs = field_int(fields, "TS")
+        if fields.get("TT") is not None:
+            event.timer_ticking = fields.get("TT") == "1"
+        if fields.get("TU"):
+            event.timer_tu = fields["TU"]
         if fields.get("FS") is not None:
             event.live = fields.get("FS") == "1"
         if fields.get("IT"):
@@ -236,12 +245,17 @@ class ZapFeedState:
             merge_fields(event.fields, patch)
             if patch.get("SS"):
                 event.score = patch["SS"]
-            if patch.get("TM"):
+            if patch.get("TM") is not None:
                 event.minute = field_int(patch, "TM")
+            if patch.get("TS") is not None:
+                event.timer_secs = field_int(patch, "TS")
+            if patch.get("TT") is not None:
+                event.timer_ticking = patch.get("TT") == "1"
             if patch.get("TU"):
+                event.timer_tu = patch["TU"]
                 event.fields["TU"] = patch["TU"]
-            if patch.get("TS"):
-                event.fields["TS"] = patch["TS"]
+            if patch.get("FS") is not None:
+                event.live = patch.get("FS") == "1"
 
     def _selection_for_path(self, path: str | None) -> SelectionState | None:
         if not path:
@@ -291,9 +305,67 @@ class ZapFeedState:
         """Events to export — all sports with odds when import_all, else soccer 1X2 only."""
         if import_all_from_socket():
             return self._export_all_events(live_only=live_only)
-        return self.soccer_events_with_main_market() if not live_only else [
-            e for e in self.soccer_events_with_main_market() if e.live
+        events = self.soccer_events_with_main_market()
+        if live_only:
+            events = [e for e in events if e.live]
+        return [e for e in events if not self._is_finished(e)]
+
+    def drop_finished_events(self) -> int:
+        """Remove finished / left-live matches from in-memory state."""
+        drop_ids = [
+            fi
+            for fi, event in self.events.items()
+            if self._is_match_event(event) and self._is_finished(event)
         ]
+        for fi in drop_ids:
+            self._drop_event(fi)
+        return len(drop_ids)
+
+    def _drop_event(self, fi: int) -> None:
+        event = self.events.pop(fi, None)
+        if event is None:
+            return
+        market_fi = self.market_fi(event)
+        drop_markets = [
+            it
+            for it, market in self.markets.items()
+            if market.fi in (fi, market_fi)
+        ]
+        for it in drop_markets:
+            self.markets.pop(it, None)
+        drop_sels = [
+            it
+            for it, sel in self.selections.items()
+            if sel.fi in (fi, market_fi)
+        ]
+        for it in drop_sels:
+            self.selections.pop(it, None)
+
+    def _is_finished(self, event: EventState) -> bool:
+        """
+        True when a match has left the in-play book.
+
+        Finished games often linger in ZAP state; do not persist them as live.
+        Fully suspended markets are not treated as finished (betting blocked).
+        """
+        if not self._is_match_event(event):
+            return False
+        if not event.live:
+            score = (event.score or "").strip()
+            if score and score not in {"0-0", "0-0,0-0"}:
+                return True
+            return bool(event.minute is not None and event.minute > 0)
+        # Still FS=1: finished only when priced selections were removed entirely.
+        if self._event_has_odds(event):
+            return False
+        market_fi = self.market_fi(event)
+        still_has_priced_rows = any(
+            s.fi == market_fi and s.odds_decimal is not None
+            for s in self.selections.values()
+        )
+        if still_has_priced_rows:
+            return False
+        return bool(event.score or event.minute is not None)
 
     def _export_all_events(self, *, live_only: bool) -> list[EventState]:
         result: list[EventState] = []
@@ -303,6 +375,8 @@ class ZapFeedState:
             if skip_esoccer() and self._is_esoccer(event):
                 continue
             if not self._is_match_event(event):
+                continue
+            if self._is_finished(event):
                 continue
             if not self._event_has_odds(event):
                 continue

@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import time
+from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from adapters.base import Change, ChangeType, EventRef, OddsOutcome, PacketSummary
 from bet365.odds_config import (
@@ -15,6 +18,8 @@ from bet365.odds_config import (
 from bet365.state import EventState, SelectionState, ZapFeedState
 from bet365.zap_parse import field_int, parse_match_teams, sport_class_from_event_fields
 
+_LONDON = ZoneInfo("Europe/London")
+
 
 def _parse_score(score: str) -> tuple[int | None, int | None]:
     text = (score or "").strip()
@@ -25,6 +30,68 @@ def _parse_score(score: str) -> tuple[int | None, int | None]:
         return int(left.strip()), int(right.strip())
     except ValueError:
         return None, None
+
+
+def _parse_tu_epoch(tu: str | None) -> int | None:
+    """Bet365 TU: YearMonthDayHourMinSecs in Europe/London."""
+    if not tu:
+        return None
+    raw = str(tu).strip()
+    if len(raw) < 14 or not raw[:14].isdigit():
+        return None
+    try:
+        dt = datetime.strptime(raw[:14], "%Y%m%d%H%M%S").replace(tzinfo=_LONDON)
+        return int(dt.timestamp())
+    except ValueError:
+        return None
+
+
+def _timer_payload(event: EventState) -> dict[str, Any]:
+    """
+    Bet365 clock: TM=mins, TS=secs, TT=ticking, TU=period sync time.
+
+    Frontend advances timer_seconds since timer_updated_at. We must:
+    - run when the match clock is playing (TT=1, or live with TT unknown)
+    - stop on break (TT=0)
+    - prefer absolute elapsed when TU is present
+    """
+    tm = event.minute
+    ts = event.timer_secs
+    if tm is None and ts is None:
+        return {}
+
+    mins = int(tm or 0)
+    secs = int(ts or 0)
+    base = max(0, mins * 60 + secs)
+
+    if event.timer_ticking is False:
+        ticking = False
+    elif event.timer_ticking is True:
+        ticking = True
+    else:
+        # TT often omitted on EV snapshots — assume running for in-play.
+        ticking = bool(event.live)
+
+    tu_epoch = _parse_tu_epoch(event.timer_tu or event.fields.get("TU"))
+
+    if ticking and tu_epoch is not None:
+        # passed = (NOW - TU) + TM*60 + TS
+        passed = max(0, int(time.time()) - tu_epoch) + base
+        display_min = passed // 60
+        return {
+            "minute": display_min,
+            "timer_seconds": passed,
+            "timer_display": f"{display_min}'",
+            "score_function": "run",
+        }
+
+    display_min = mins if tm is not None else base // 60
+    return {
+        "minute": display_min,
+        "timer_seconds": base,
+        "timer_display": f"{display_min}'",
+        "score_function": "run" if ticking else "stop",
+    }
 
 
 def _sport_payload_id(event: EventState, state: ZapFeedState) -> int:
@@ -105,7 +172,7 @@ def _selection_outcome_dict(
     standard_factors: bool,
     n_outcomes: int,
 ) -> dict[str, Any] | None:
-    if sel.odds_decimal is None:
+    if sel.odds_decimal is None or sel.suspended:
         return None
     pa_id = field_int(sel.fields, "ID")
     factor_id: int | None = None
@@ -203,8 +270,11 @@ def map_state_to_changes(
             )
         )
 
-        if event.score:
-            score1, score2 = _parse_score(event.score)
+        if event.score or event.minute is not None or event.timer_secs is not None:
+            score1, score2 = (
+                _parse_score(event.score) if event.score else (None, None)
+            )
+            timer = _timer_payload(event)
             changes.append(
                 Change(
                     change_type=ChangeType.SCORE,
@@ -214,9 +284,7 @@ def map_state_to_changes(
                         "score1": score1,
                         "score2": score2,
                         "score": event.score,
-                        "minute": event.minute,
-                        "timer_seconds": event.minute * 60 if event.minute is not None else None,
-                        "timer_display": f"{event.minute}'" if event.minute is not None else None,
+                        **timer,
                     },
                 )
             )
@@ -230,6 +298,7 @@ def map_state_to_changes(
             else:
                 markets = []
 
+        open_outcomes = 0
         for market_id, market_name, selections in markets:
             outcomes = _outcomes_from_selections(
                 selections,
@@ -238,6 +307,7 @@ def map_state_to_changes(
             )
             if len(outcomes) < 1:
                 continue
+            open_outcomes += len(outcomes)
             display_market = market_name or f"Market {market_id}"
             changes.append(
                 Change(
@@ -252,6 +322,17 @@ def map_state_to_changes(
                     },
                 )
             )
+
+        changes.append(
+            Change(
+                change_type=ChangeType.BETTING_STATUS,
+                match_payload_id=event.fi,
+                packet_version=packet_version,
+                payload={
+                    "state": "unblocked" if open_outcomes >= 1 else "blocked",
+                },
+            )
+        )
 
     return changes
 
@@ -281,7 +362,7 @@ def state_summary(state: ZapFeedState) -> PacketSummary:
         leagues=len({e.competition for e in events if e.competition}),
         fixtures=len(events),
         score_changes=sum(1 for e in events if e.score),
-        betting_status_changes=0,
+        betting_status_changes=len(events),
         odds_markets=odds_markets,
         odds_outcomes=outcome_total,
     )

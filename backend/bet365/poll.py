@@ -29,10 +29,13 @@ def _print_summary(
     by_type = Counter(c.change_type.value for c in changes)
     extra = ""
     if counts:
+        pruned = counts.get("matches_deleted", 0)
         extra = (
             f" db_matches={counts['matches']} db_scores={counts['scores_updated']} "
             f"db_odds={counts['odds_lines']}"
         )
+        if pruned:
+            extra += f" pruned_finished={pruned}"
     print(
         f"[{iteration}] zap_chunks={chunks} "
         f"fixtures={summary.fixtures} scores={summary.score_changes} "
@@ -80,6 +83,14 @@ def run_poll(
             ):
                 iteration += 1
                 try:
+                    # Keep DB live set aligned with current export — drop finished
+                    # matches that left the ZAP feed / lost open odds.
+                    active_ids = {
+                        c.match_payload_id
+                        for c in changes
+                        if c.change_type == ChangeType.FIXTURE
+                        and (c.payload or {}).get("place") == "live"
+                    }
                     snapshot_id, counts = apply_changes(
                         conn,
                         changes,
@@ -87,6 +98,9 @@ def run_poll(
                         packet_version=int(time.time()),
                         source_file="bet365 poll",
                         retain_snapshot_years=db_config.retain_snapshot_years,
+                        prune_absent=bool(active_ids),
+                        active_match_ids=active_ids,
+                        prune_place="live",
                     )
                 except Exception as exc:
                     logger.warning("DB import iteration %s failed: %s", iteration, exc)
