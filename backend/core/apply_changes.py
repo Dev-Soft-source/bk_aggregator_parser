@@ -19,8 +19,22 @@ from retention import (
     prune_stale_matches,
 )
 
-# Frontend queries use ODDS_FACTOR_IDS=921,922,923 — map Liga Stavok 2-way line to 921/923 slots.
-NORMALIZED_FACTOR_IDS: tuple[int, ...] = (921, 923)
+# Frontend queries use ODDS_FACTOR_IDS=921,922,923 — map oversized bookmaker
+# factor ids (e.g. Liga Stavok facId) onto the 921/923 2-way slots.
+NORMALIZED_FACTOR_IDS: tuple[int, ...] = (921, 922, 923)
+_INT32_MAX = 2_147_483_647
+_INT32_MIN = -2_147_483_648
+
+
+def _canonical_factor_id(raw_factor: Any, idx: int) -> int | None:
+    """Return an INTEGER-safe factor_id for odds_lines."""
+    if raw_factor is not None:
+        factor_id = int(raw_factor)
+        if _INT32_MIN <= factor_id <= _INT32_MAX:
+            return factor_id
+    if idx < len(NORMALIZED_FACTOR_IDS):
+        return NORMALIZED_FACTOR_IDS[idx]
+    return None
 
 
 def _upsert_site(cur: psycopg2.extensions.cursor, name: str) -> int:
@@ -290,15 +304,17 @@ def apply_changes(
                 odds_rows: list[tuple[Any, ...]] = []
                 factor_ids_used: list[int] = []
                 for idx, outcome in enumerate(outcomes):
-                    raw_factor = outcome.get("factor_id")
-                    if raw_factor is not None:
-                        factor_id = int(raw_factor)
-                    elif idx < len(NORMALIZED_FACTOR_IDS):
-                        factor_id = NORMALIZED_FACTOR_IDS[idx]
-                    else:
+                    factor_id = _canonical_factor_id(outcome.get("factor_id"), idx)
+                    if factor_id is None:
                         continue
                     factor_ids_used.append(factor_id)
                     all_factor_ids.append(factor_id)
+                    line_param_raw = outcome.get("line_param_raw")
+                    if line_param_raw is None:
+                        raw_factor = outcome.get("factor_id")
+                        # Oversized native ids belong in BIGINT line_param_raw.
+                        if raw_factor is not None and int(raw_factor) != factor_id:
+                            line_param_raw = int(raw_factor)
                     odds_rows.append(
                         (
                             site_id,
@@ -308,7 +324,7 @@ def apply_changes(
                             factor_id,
                             outcome.get("odds"),
                             line_param,
-                            outcome.get("factor_id"),
+                            line_param_raw,
                             outcome.get("line_param_text"),
                             bool(outcome.get("is_handicap_total")),
                             snapshot_id,

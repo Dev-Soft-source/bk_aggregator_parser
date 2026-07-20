@@ -21,6 +21,7 @@ DEFAULT_USER_AGENT = (
 DEFAULT_BROWSER_ENTRY_URL = "https://www.bet365.com/"
 DEFAULT_BROWSER_URL = "https://www.bet365.com/#/HO/"
 DEFAULT_BROWSER_CDP_URL = "http://127.0.0.1:9223"
+DEFAULT_LINE_COOKIE_IMPORT_CDP_URL = "http://127.0.0.1:9223"
 DEFAULT_BROWSER_TIMEOUT = 90.0
 DEFAULT_POLL_INTERVAL = 3.5
 DEFAULT_SAFE_POLL_INTERVAL = 8.0
@@ -92,6 +93,7 @@ class Bet365Config:
     output_path: str | None
     use_browser: bool
     browser_cdp_url: str | None
+    browser_cookie_import_cdp_url: str | None
     browser_entry_url: str
     browser_url: str
     browser_timeout_seconds: float
@@ -183,6 +185,7 @@ class Bet365Config:
             output_path=output,
             use_browser=use_browser_raw in ("1", "true", "yes", "on"),
             browser_cdp_url=cdp_url or DEFAULT_BROWSER_CDP_URL,
+            browser_cookie_import_cdp_url=None,
             browser_entry_url=os.getenv(
                 "BET365_BROWSER_ENTRY_URL", DEFAULT_BROWSER_ENTRY_URL
             ).strip(),

@@ -225,7 +225,7 @@ def main() -> None:
     parser.add_argument(
         "--browser",
         action="store_true",
-        help="Tap live WS from CDP Chrome (default for poll)",
+        help=argparse.SUPPRESS,  # default; kept for backward compatibility
     )
     parser.add_argument(
         "--direct",

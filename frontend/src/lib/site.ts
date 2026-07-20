@@ -16,7 +16,8 @@ export function pollCommandForSite(siteName: string): string {
     case "bet365.com":
       return "python main.py poll bet365";
     case "ligastavok.ru":
-      return "python main.py poll ligastavok --browser";
+      // Also: python main.py poll ligastavok-line
+      return "python main.py poll ligastavok-live";
     case "betcity.ru":
       return "python main.py poll betcity --browser";
     case "1xbet.com":

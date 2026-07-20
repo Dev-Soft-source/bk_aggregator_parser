@@ -11,15 +11,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
+from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from bet365.cloudflare_gate import (
     attempt_turnstile_click,
     challenge_user_message,
+    geo_gate_user_message,
     is_bet365_authenticated,
     is_bet365_live_ready,
     is_cloudflare_challenge,
     is_live_hub_url,
+    is_usa_geo_gate,
 )
 from bet365.config import (
     Bet365Config,
@@ -29,6 +32,8 @@ from bet365.config import (
 )
 
 logger = logging.getLogger(__name__)
+
+INTERNATIONAL_SPORTS_HOME = "https://www.bet365.com/#/HO/"
 
 _PREFERRED_COOKIE_NAMES: tuple[str, ...] = (
     "pstk",
@@ -40,11 +45,22 @@ _PREFERRED_COOKIE_NAMES: tuple[str, ...] = (
 # Cookie consent banner (fresh bet365-chrome-debug profile) — "Accept all"
 _COOKIE_ACCEPT_LABELS: tuple[str, ...] = (
     "Nõustu kõigiga",  # Estonian
+    "Acceptati toate",  # Romanian
+    "Acceptați toate",  # Romanian (diacritic)
     "Accept All",
     "Accept all",
     "Alle akzeptieren",  # German
     "Acceptez tout",  # French
     "Aceptar todo",  # Spanish
+    "Accetta tutti",  # Italian
+    "Aceitar tudo",  # Portuguese
+)
+
+_COOKIE_BANNER_TEXT_MARKERS: tuple[str, ...] = (
+    "foloseste cookie",
+    "cookie-uri",
+    "cookies",
+    "küpsiseid",
 )
 
 
@@ -60,6 +76,69 @@ class CapturedSession:
     premws_url: str | None
     aux_url: str | None
     ws_urls: tuple[str, ...]
+
+
+def _read_cookies_from_cdp(
+    cdp_url: str,
+    *,
+    playwright: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Read bet365 cookies from another CDP Chrome (e.g. live 9223 → line 9225).
+
+    Prefer an existing Playwright instance — nested sync_playwright().start() fails
+    with "Sync API inside the asyncio loop".
+    """
+    own_pw = False
+    pw = playwright
+    if pw is None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            return []
+        pw = sync_playwright().start()
+        own_pw = True
+
+    browser = None
+    try:
+        browser = pw.chromium.connect_over_cdp(cdp_url)
+        if not browser.contexts:
+            return []
+        return list(browser.contexts[0].cookies())
+    except Exception as exc:
+        logger.warning("Could not read cookies from %s: %s", cdp_url, exc)
+        return []
+    finally:
+        if browser is not None:
+            try:
+                browser.close()
+            except Exception:
+                pass
+        if own_pw:
+            try:
+                pw.stop()
+            except Exception:
+                pass
+
+
+def _bet365_cookies_for_import(cookies: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for item in cookies:
+        domain = (item.get("domain") or "").lower()
+        if "bet365" not in domain:
+            continue
+        # Drop Playwright-only / CDP-only keys that break add_cookies.
+        entry: dict[str, Any] = {
+            "name": item.get("name"),
+            "value": item.get("value"),
+            "domain": item.get("domain"),
+            "path": item.get("path") or "/",
+        }
+        for key in ("expires", "httpOnly", "secure", "sameSite"):
+            if key in item and item[key] is not None:
+                entry[key] = item[key]
+        if entry["name"] and entry["value"] is not None and entry["domain"]:
+            out.append(entry)
+    return out
 
 
 def build_cookie_header(cookies: list[dict[str, Any]]) -> str:
@@ -107,8 +186,17 @@ def _wait_for_cdp(cdp_url: str, timeout_seconds: float) -> bool:
     return False
 
 
-def _launch_chrome_script() -> None:
-    script = Path(__file__).resolve().parents[1] / "scripts" / "start_chrome_cdp_bet365.ps1"
+def _chrome_launch_script_for_cdp(cdp_url: str) -> Path:
+    """Pick live (9223) vs line (9225) Chrome launcher from CDP URL port."""
+    scripts_dir = Path(__file__).resolve().parents[1] / "scripts"
+    port = urlparse(cdp_url).port
+    if port == 9225:
+        return scripts_dir / "start_chrome_cdp_bet365_line.ps1"
+    return scripts_dir / "start_chrome_cdp_bet365.ps1"
+
+
+def _launch_chrome_script(cdp_url: str) -> None:
+    script = _chrome_launch_script_for_cdp(cdp_url)
     if not script.is_file():
         logger.warning("Missing %s", script)
         return
@@ -145,6 +233,8 @@ class Bet365BrowserSession:
         self._cloudflare_auto_click_attempts = 0
         self._cookie_banner_seen_since: float | None = None
         self._cookie_banner_notice_printed = False
+        self._geo_gate_notice_printed = False
+        self._cookie_import_done = False
 
     def _has_cf_clearance_cookie(self) -> bool:
         if self._context is None:
@@ -204,6 +294,46 @@ class Bet365BrowserSession:
         cookie = self._cookie_header()
         return self._session_id_from_cookie(cookie) is not None
 
+    def _is_page_usable(self) -> bool:
+        page = self._page
+        if page is None:
+            return False
+        try:
+            return not page.is_closed()
+        except Exception:
+            return False
+
+    def _refresh_page_reference(self) -> bool:
+        """Re-attach to a live tab when the current page was closed."""
+        if self._browser is None:
+            return False
+        try:
+            contexts = self._browser.contexts
+            if not contexts:
+                return False
+            self._context = contexts[0]
+            for page in self._context.pages:
+                try:
+                    if not page.is_closed():
+                        self._page = page
+                        self._ensure_ws_listener()
+                        logger.info("Re-attached to Chrome tab: %s", page.url or "(blank)")
+                        return True
+                except Exception:
+                    continue
+            self._page = self._context.new_page()
+            self._ensure_ws_listener()
+            logger.info("Opened new Chrome tab for bet365 session")
+            return True
+        except Exception as exc:
+            logger.warning("Could not refresh Chrome tab: %s", exc)
+            return False
+
+    def _ensure_page_usable(self) -> bool:
+        if self._is_page_usable():
+            return True
+        return self._refresh_page_reference()
+
     def _read_page_state(self) -> tuple[str, str, str]:
         page = self._page
         if page is None:
@@ -222,14 +352,104 @@ class Bet365BrowserSession:
             body_text = ""
         return url, title, body_text
 
+    def _is_on_usa_geo_gate(self) -> bool:
+        url, title, body_text = self._read_page_state()
+        return is_usa_geo_gate(url=url, title=title, body_text=body_text)
+
+    def _import_cookies_from_cdp(self, source_cdp_url: str) -> int:
+        if self._context is None:
+            return 0
+        raw = _read_cookies_from_cdp(
+            source_cdp_url,
+            playwright=self._playwright,
+        )
+        to_add = _bet365_cookies_for_import(raw)
+        if not to_add:
+            logger.warning("No bet365 cookies found on %s", source_cdp_url)
+            return 0
+        try:
+            # Replace any US-region cookies already in the line profile.
+            self._context.clear_cookies()
+            self._context.add_cookies(to_add)
+        except Exception as exc:
+            logger.warning("add_cookies failed (%s items): %s", len(to_add), exc)
+            added = 0
+            for item in to_add:
+                try:
+                    self._context.add_cookies([item])
+                    added += 1
+                except Exception:
+                    continue
+            return added
+        return len(to_add)
+
+    def _maybe_import_cookies_from_live(self, *, force: bool = False) -> int:
+        source = (self._config.browser_cookie_import_cdp_url or "").strip()
+        if not source:
+            return 0
+        if self._cookie_import_done and not force:
+            return 0
+        if not _cdp_is_up(source):
+            logger.warning(
+                "Live Chrome not available at %s — keep bet365 live poll running",
+                source,
+            )
+            return 0
+        count = self._import_cookies_from_cdp(source)
+        if count > 0:
+            self._cookie_import_done = True
+            logger.info("Imported %s bet365 cookies from %s", count, source)
+        return count
+
+    def _handle_usa_geo_gate(self) -> bool:
+        """Import live cookies and open international sports home (#/HO/)."""
+        if not self._geo_gate_notice_printed:
+            self._geo_gate_notice_printed = True
+            source = self._config.browser_cookie_import_cdp_url or "http://127.0.0.1:9223"
+            message = geo_gate_user_message(live_cdp_url=source)
+            logger.warning(message.replace("\n", " "))
+            print(f"\n{message}\n")
+
+        imported = self._maybe_import_cookies_from_live(force=True)
+        if imported > 0:
+            print(f"Imported {imported} cookies from live Chrome — opening sports home …")
+
+        if not self._ensure_page_usable():
+            return False
+        page = self._page
+        if page is None:
+            return False
+
+        timeout_ms = int(self._config.browser_timeout_seconds * 1000)
+        try:
+            page.goto(
+                INTERNATIONAL_SPORTS_HOME,
+                wait_until="domcontentloaded",
+                timeout=timeout_ms,
+            )
+            page.wait_for_timeout(1500)
+        except Exception as exc:
+            logger.warning("Could not open sports home after geo gate: %s", exc)
+            return False
+
+        if self._is_on_usa_geo_gate():
+            return False
+        print("Past US geo gate — continuing to line hub.")
+        return True
+
     def _open_entry_page(self) -> None:
         """Load bet365 root for Cloudflare auth (not the live hub)."""
+        if self._is_on_usa_geo_gate():
+            self._handle_usa_geo_gate()
+            return
+        if not self._ensure_page_usable():
+            return
         page = self._page
         if page is None:
             return
         entry = self._config.browser_entry_url.rstrip("/") + "/"
-        current = (page.url or "").split("#", 1)[0].rstrip("/") + "/"
-        if current.rstrip("/") == entry.rstrip("/") and not is_live_hub_url(page.url or ""):
+        current = (page.url or "").rstrip("/") + "/"
+        if current == entry:
             return
         timeout_ms = int(self._config.browser_timeout_seconds * 1000)
         logger.info("Opening entry page %s for Cloudflare authentication …", entry)
@@ -238,6 +458,8 @@ class Bet365BrowserSession:
 
     def _navigate_to_live_hub(self, *, reload_if_on_page: bool = False) -> None:
         """Open live hub after authentication."""
+        if not self._ensure_page_usable():
+            return
         page = self._page
         if page is None:
             return
@@ -267,6 +489,9 @@ class Bet365BrowserSession:
 
         while time.monotonic() < deadline:
             url, title, body_text = self._read_page_state()
+            if is_usa_geo_gate(url=url, title=title, body_text=body_text):
+                self._handle_usa_geo_gate()
+                continue
             if is_bet365_authenticated(
                 url=url,
                 title=title,
@@ -335,7 +560,10 @@ class Bet365BrowserSession:
         )
         auth_deadline = time.monotonic() + wait_seconds
 
+        self._maybe_import_cookies_from_live()
         self._open_entry_page()
+        if self._is_on_usa_geo_gate():
+            self._handle_usa_geo_gate()
         self._wait_for_authentication(auth_deadline)
         self._reset_cloudflare_episode()
         self._cloudflare_waiting = False
@@ -359,6 +587,8 @@ class Bet365BrowserSession:
                 self._open_entry_page()
                 self._wait_for_authentication(auth_deadline)
                 self._navigate_to_live_hub()
+            elif is_usa_geo_gate(url=url, title=title, body_text=body_text):
+                self._handle_usa_geo_gate()
             self._maybe_dismiss_cookie_banner()
             self._page.wait_for_timeout(1000)
 
@@ -394,12 +624,13 @@ class Bet365BrowserSession:
         self._playwright = sync_playwright().start()
 
         if not _cdp_is_up(cdp_url):
-            logger.info("CDP not up — starting Chrome via start_chrome_cdp_bet365.ps1 …")
-            _launch_chrome_script()
+            launch_script = _chrome_launch_script_for_cdp(cdp_url)
+            logger.info("CDP not up — starting Chrome via %s …", launch_script.name)
+            _launch_chrome_script(cdp_url)
             if not _wait_for_cdp(cdp_url, self._config.browser_timeout_seconds):
                 raise Bet365BrowserError(
                     f"Chrome CDP not available at {cdp_url}.\n"
-                    "Run: .\\scripts\\start_chrome_cdp_bet365.ps1\n"
+                    f"Run: .\\scripts\\{launch_script.name}\n"
                     "Open bet365.com in that Chrome window, then retry."
                 )
 
@@ -488,6 +719,14 @@ class Bet365BrowserSession:
                     return True
             except Exception:
                 continue
+        try:
+            body = page.evaluate(
+                "() => (document.body?.innerText || '').slice(0, 3000).toLowerCase()"
+            )
+            if any(m in body for m in _COOKIE_BANNER_TEXT_MARKERS):
+                return True
+        except Exception:
+            pass
         return False
 
     def _click_cookie_accept(self, page: Any) -> bool:
@@ -500,6 +739,17 @@ class Bet365BrowserSession:
                 logger.info("Cookie banner dismissed (%s)", label)
                 page.wait_for_timeout(300)
                 return True
+            except Exception:
+                continue
+        # Fallback: text match (some locales use non-standard button roles).
+        for label in _COOKIE_ACCEPT_LABELS:
+            try:
+                button = page.get_by_text(label, exact=True)
+                if button.is_visible(timeout=300):
+                    button.click(timeout=2500)
+                    logger.info("Cookie banner dismissed via text (%s)", label)
+                    page.wait_for_timeout(300)
+                    return True
             except Exception:
                 continue
         return False
@@ -836,12 +1086,24 @@ class Bet365BrowserSession:
     def collect_frames(self, deadline: float) -> list[str]:
         """Drain raw ZAP frames from browser WebSockets until deadline."""
         self._ensure_ws_listener()
-        if self._config.wait_for_cloudflare and self._page is not None:
-            url, title, body_text = self._read_page_state()
-            if is_cloudflare_challenge(url=url, title=title, body_text=body_text):
-                self.ensure_bet365_ready(timeout=120.0)
-            elif not is_live_hub_url(url):
-                self._navigate_to_live_hub()
+        if self._config.wait_for_cloudflare:
+            if not self._ensure_page_usable():
+                logger.warning(
+                    "Chrome tab closed — keep CDP Chrome open on %s",
+                    self._config.browser_url,
+                )
+            elif self._page is not None:
+                url, title, body_text = self._read_page_state()
+                if url and is_usa_geo_gate(
+                    url=url, title=title, body_text=body_text
+                ):
+                    self._handle_usa_geo_gate()
+                elif url and is_cloudflare_challenge(
+                    url=url, title=title, body_text=body_text
+                ):
+                    self.ensure_bet365_ready(timeout=120.0)
+                elif url and not is_live_hub_url(url) and not self._ws_urls:
+                    self._navigate_to_live_hub()
         frames: list[str] = []
         while time.time() < deadline:
             remaining = deadline - time.time()
@@ -850,9 +1112,18 @@ class Bet365BrowserSession:
             try:
                 frames.append(self._frame_queue.get(timeout=min(0.25, remaining)))
             except queue.Empty:
-                if self._page is not None:
+                if self._is_page_usable():
                     self._maybe_dismiss_cookie_banner()
-                    self._page.wait_for_timeout(50)
+                    try:
+                        self._page.wait_for_timeout(50)
+                    except Exception as exc:
+                        if "closed" in str(exc).lower():
+                            if not self._refresh_page_reference():
+                                break
+                        else:
+                            raise
+                elif not self._refresh_page_reference():
+                    time.sleep(min(0.25, remaining))
                 continue
         return frames
 

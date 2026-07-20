@@ -31,7 +31,7 @@ python main.py poll betcity-line --once --samples
 # BETCITY_LINE_CSN=ooca9s
 # BETCITY_LINE_POLL_INTERVAL_SECONDS=10
 # BETCITY_LINE_HTTP_TIMEOUT=90
-# BETCITY_LINE_CONNECT_TIMEOUT=20
+# BETCITY_LINE_CONNECT_TIMEOUT=60
 ```
 
 On network timeouts the poller keeps the last `md` cursor and backs off instead of immediately re-fetching the full snapshot. After several consecutive failures it resets to a snapshot.

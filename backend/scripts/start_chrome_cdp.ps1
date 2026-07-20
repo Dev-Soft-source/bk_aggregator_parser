@@ -29,8 +29,8 @@ if (-not $chrome) {
 
 if (Test-CdpUp) {
     Write-Host "OK: Chrome CDP already on port $port"
-    Write-Host "Open https://www.ligastavok.ru in THAT Chrome window (separate profile: liga-chrome-debug)."
-    Write-Host "Then: python main.py poll ligastavok --browser --curl capture.curl"
+    Write-Host "Open https://www.ligastavok.ru/live in THAT Chrome window (separate profile: liga-chrome-debug)."
+    Write-Host "Then: python main.py poll ligastavok-live"
     exit 0
 }
 
@@ -41,7 +41,7 @@ $args = @(
     "--user-data-dir=$userData",
     "--no-first-run",
     "--no-default-browser-check",
-    "https://www.ligastavok.ru"
+    "https://www.ligastavok.ru/live"
 )
 
 Write-Host "Chrome: $chrome"
@@ -63,7 +63,7 @@ while ((Get-Date) -lt $deadline) {
         Write-Host ""
         Write-Host "Leave this Chrome window open. In another terminal:"
         Write-Host "  cd backend"
-        Write-Host "  python main.py poll ligastavok --browser --curl capture.curl"
+        Write-Host "  python main.py poll ligastavok-live"
         exit 0
     }
 }

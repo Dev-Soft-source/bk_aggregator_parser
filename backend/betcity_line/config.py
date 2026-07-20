@@ -16,9 +16,10 @@ DEFAULT_VER = "82"
 DEFAULT_CSN = "ooca9s"
 DEFAULT_ADD = "dep_events"
 DEFAULT_POLL_INTERVAL = 10.0
-# Full /d/off/events payloads are large; 30s often times out on slow links.
+# Full /d/off/events payloads are large; slow links need a long read.
 DEFAULT_TIMEOUT = 90.0
-DEFAULT_CONNECT_TIMEOUT = 20.0
+# TLS handshake to ad.betcity.ru often counts against connect; 20s is too tight.
+DEFAULT_CONNECT_TIMEOUT = 60.0
 DEFAULT_SITE_NAME = "betcity.ru"
 DEFAULT_MAX_BACKOFF = 120.0
 # After this many consecutive network failures, force a fresh snapshot.

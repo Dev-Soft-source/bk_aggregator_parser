@@ -267,7 +267,7 @@ export function Dashboard() {
                   <div className="mt-2 space-y-1 text-amber-400">
                     <code className="block">cd backend && python main.py poll</code>
                     <code className="block">
-                      cd backend && python main.py poll ligastavok --browser
+                      cd backend && python main.py poll ligastavok-live
                     </code>
                     <code className="block">cd backend && python main.py poll bet365</code>
                   </div>

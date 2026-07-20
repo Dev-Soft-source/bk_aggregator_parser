@@ -73,6 +73,83 @@ class FonbetMapperTests(unittest.TestCase):
                 f"match {match_id} has {count} odds outcomes, expected <= 2",
             )
 
+    def test_every_fixture_gets_betting_status(self) -> None:
+        changes = map_packet_to_changes(self.packet)
+        fixtures = {
+            c.match_payload_id for c in changes if c.change_type == ChangeType.FIXTURE
+        }
+        statuses = {
+            c.match_payload_id: c.payload.get("state")
+            for c in changes
+            if c.change_type == ChangeType.BETTING_STATUS
+        }
+        self.assertTrue(fixtures)
+        self.assertTrue(fixtures.issubset(statuses.keys()))
+        for mid in fixtures:
+            self.assertIn(
+                statuses[mid],
+                ("unblocked", "blocked", "partial", "unknown"),
+            )
+
+    def test_default_status_unblocked_without_event_blocks(self) -> None:
+        packet = {
+            "packetVersion": 1,
+            "sports": [
+                {"id": 1, "kind": "sport", "name": "Soccer", "sortOrder": 1},
+                {"id": 10, "kind": "segment", "name": "Test League", "parentId": 1},
+            ],
+            "events": [
+                {
+                    "id": 1001,
+                    "level": 1,
+                    "sportId": 10,
+                    "team1": "A",
+                    "team2": "B",
+                    "place": "line",
+                }
+            ],
+            "eventBlocks": [],
+            "customFactors": [],
+            "eventMiscs": [],
+            "liveEventInfos": [],
+        }
+        changes = map_packet_to_changes(packet)
+        status = next(
+            c for c in changes if c.change_type == ChangeType.BETTING_STATUS
+        )
+        self.assertEqual(status.match_payload_id, 1001)
+        self.assertEqual(status.payload["state"], "unblocked")
+
+    def test_odds_only_delta_emits_unblocked_status(self) -> None:
+        packet = {
+            "packetVersion": 2,
+            "fromVersion": 1,
+            "sports": [],
+            "events": [],
+            "eventBlocks": [],
+            "customFactors": [
+                {
+                    "e": 2002,
+                    "factors": [
+                        {"f": 921, "v": 1.9},
+                        {"f": 922, "v": 3.4},
+                        {"f": 923, "v": 4.0},
+                    ],
+                }
+            ],
+            "eventMiscs": [],
+            "liveEventInfos": [],
+        }
+        changes = map_packet_to_changes(packet, known_match_ids={2002})
+        statuses = [
+            c for c in changes if c.change_type == ChangeType.BETTING_STATUS
+        ]
+        self.assertEqual(len(statuses), 1)
+        self.assertEqual(statuses[0].match_payload_id, 2002)
+        self.assertEqual(statuses[0].payload["state"], "unblocked")
+        odds = [c for c in changes if c.change_type == ChangeType.ODDS]
+        self.assertEqual(len(odds), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

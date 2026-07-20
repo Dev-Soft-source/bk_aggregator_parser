@@ -357,6 +357,38 @@ def import_packet(
             match_ids.add(event["id"])
             matches_inserted += 1
 
+        # Every fixture gets betting_status (eventBlocks override, else unblocked).
+        status_written: set[int] = set()
+        for match_id in match_ids:
+            block = None
+            for event_id, payload in event_blocks.items():
+                if (
+                    resolve_match_id_for_update(event_id, events_by_id, match_ids)
+                    == match_id
+                ):
+                    block = payload
+                    break
+            cur.execute(
+                """
+                INSERT INTO betting_status (
+                    site_id, match_id, state, partial_factor_ids, snapshot_id
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (site_id, match_id) DO UPDATE
+                SET state = EXCLUDED.state,
+                    partial_factor_ids = EXCLUDED.partial_factor_ids,
+                    snapshot_id = EXCLUDED.snapshot_id
+                """,
+                (
+                    site_id,
+                    match_id,
+                    (block or {}).get("state", "unblocked"),
+                    (block or {}).get("factors"),
+                    snapshot_id,
+                ),
+            )
+            status_written.add(match_id)
+
         known_match_ids = _load_known_match_ids(cur, site_id)
         score_update_ids = _collect_score_update_ids(
             match_ids,
@@ -376,76 +408,81 @@ def import_packet(
                 events_by_id,
                 known_match_ids,
             )
-            if not misc and not live:
-                continue
-
-            cur.execute(
-                """
-                INSERT INTO match_scores (
-                    site_id, match_id, score1, score2, timer_seconds, timer_display,
-                    timer_direction, live_delay, score_function, raw_scores,
-                    subscores, timer_updated_at, snapshot_id
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (site_id, match_id) DO UPDATE
-                SET score1 = EXCLUDED.score1,
-                    score2 = EXCLUDED.score2,
-                    timer_seconds = EXCLUDED.timer_seconds,
-                    timer_display = EXCLUDED.timer_display,
-                    timer_direction = EXCLUDED.timer_direction,
-                    live_delay = EXCLUDED.live_delay,
-                    score_function = EXCLUDED.score_function,
-                    raw_scores = EXCLUDED.raw_scores,
-                    subscores = EXCLUDED.subscores,
-                    timer_updated_at = EXCLUDED.timer_updated_at,
-                    snapshot_id = EXCLUDED.snapshot_id
-                """,
-                (
-                    site_id,
-                    match_id,
-                    misc.get("score1"),
-                    misc.get("score2"),
-                    live.get("timerSeconds", misc.get("timerSeconds")),
-                    live.get("timer"),
-                    live.get("timerDirection", misc.get("timerDirection")),
-                    misc.get("liveDelay"),
-                    live.get("scoreFunction"),
-                    psycopg2.extras.Json(live.get("scores")) if live.get("scores") else None,
-                    psycopg2.extras.Json(live.get("subscores")) if live.get("subscores") else None,
-                    millis_to_datetime(
-                        live.get("timerTimestampMsec", misc.get("timerUpdateTimestampMsec"))
-                    ),
-                    snapshot_id,
-                ),
-            )
-            scores_updated += 1
-
-            block = None
-            for event_id, payload in event_blocks.items():
-                if resolve_match_id_for_update(event_id, events_by_id, known_match_ids) == match_id:
-                    block = payload
-                    break
-
-            if block:
+            if misc or live:
                 cur.execute(
                     """
-                    INSERT INTO betting_status (
-                        site_id, match_id, state, partial_factor_ids, snapshot_id
+                    INSERT INTO match_scores (
+                        site_id, match_id, score1, score2, timer_seconds, timer_display,
+                        timer_direction, live_delay, score_function, raw_scores,
+                        subscores, timer_updated_at, snapshot_id
                     )
-                    VALUES (%s, %s, %s, %s, %s)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (site_id, match_id) DO UPDATE
-                    SET state = EXCLUDED.state,
-                        partial_factor_ids = EXCLUDED.partial_factor_ids,
+                    SET score1 = EXCLUDED.score1,
+                        score2 = EXCLUDED.score2,
+                        timer_seconds = EXCLUDED.timer_seconds,
+                        timer_display = EXCLUDED.timer_display,
+                        timer_direction = EXCLUDED.timer_direction,
+                        live_delay = EXCLUDED.live_delay,
+                        score_function = EXCLUDED.score_function,
+                        raw_scores = EXCLUDED.raw_scores,
+                        subscores = EXCLUDED.subscores,
+                        timer_updated_at = EXCLUDED.timer_updated_at,
                         snapshot_id = EXCLUDED.snapshot_id
                     """,
                     (
                         site_id,
                         match_id,
-                        block.get("state", "unknown"),
-                        block.get("factors"),
+                        misc.get("score1"),
+                        misc.get("score2"),
+                        live.get("timerSeconds", misc.get("timerSeconds")),
+                        live.get("timer"),
+                        live.get("timerDirection", misc.get("timerDirection")),
+                        misc.get("liveDelay"),
+                        live.get("scoreFunction"),
+                        psycopg2.extras.Json(live.get("scores")) if live.get("scores") else None,
+                        psycopg2.extras.Json(live.get("subscores")) if live.get("subscores") else None,
+                        millis_to_datetime(
+                            live.get("timerTimestampMsec", misc.get("timerUpdateTimestampMsec"))
+                        ),
                         snapshot_id,
                     ),
                 )
+                scores_updated += 1
+
+            # Deltas may update status for known matches not re-listed in events[].
+            if match_id not in match_ids:
+                block = None
+                for event_id, payload in event_blocks.items():
+                    if (
+                        resolve_match_id_for_update(
+                            event_id, events_by_id, known_match_ids
+                        )
+                        == match_id
+                    ):
+                        block = payload
+                        break
+                if block:
+                    cur.execute(
+                        """
+                        INSERT INTO betting_status (
+                            site_id, match_id, state, partial_factor_ids, snapshot_id
+                        )
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (site_id, match_id) DO UPDATE
+                        SET state = EXCLUDED.state,
+                            partial_factor_ids = EXCLUDED.partial_factor_ids,
+                            snapshot_id = EXCLUDED.snapshot_id
+                        """,
+                        (
+                            site_id,
+                            match_id,
+                            block.get("state", "unknown"),
+                            block.get("factors"),
+                            snapshot_id,
+                        ),
+                    )
+                    status_written.add(match_id)
 
         odds_rows: list[tuple[Any, ...]] = []
         for entry in custom_factors:
@@ -515,6 +552,41 @@ def import_packet(
                 odds_rows,
                 page_size=500,
             )
+
+            # Odds can update known line matches without events[]/eventBlocks.
+            for mid in affected_match_ids:
+                if mid in status_written:
+                    continue
+                block = None
+                for event_id, payload in event_blocks.items():
+                    if (
+                        resolve_match_id_for_update(
+                            event_id, events_by_id, known_match_ids
+                        )
+                        == mid
+                    ):
+                        block = payload
+                        break
+                cur.execute(
+                    """
+                    INSERT INTO betting_status (
+                        site_id, match_id, state, partial_factor_ids, snapshot_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s)
+                    ON CONFLICT (site_id, match_id) DO UPDATE
+                    SET state = EXCLUDED.state,
+                        partial_factor_ids = EXCLUDED.partial_factor_ids,
+                        snapshot_id = EXCLUDED.snapshot_id
+                    """,
+                    (
+                        site_id,
+                        mid,
+                        (block or {}).get("state", "unblocked"),
+                        (block or {}).get("factors"),
+                        snapshot_id,
+                    ),
+                )
+                status_written.add(mid)
 
         retention = apply_retention(
             cur,

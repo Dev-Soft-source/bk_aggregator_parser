@@ -102,6 +102,19 @@ def _collect_score_update_ids(
     return update_ids
 
 
+def _block_for_match(
+    match_id: int,
+    event_blocks: dict[int, dict[str, Any]],
+    events_by_id: dict[int, dict[str, Any]],
+    known: set[int],
+) -> dict[str, Any] | None:
+    """Return eventBlocks payload for this root match, if any."""
+    for event_id, payload in event_blocks.items():
+        if resolve_match_id_for_update(event_id, events_by_id, known) == match_id:
+            return payload
+    return None
+
+
 def discover_sports(packet: dict[str, Any]) -> list[SportRef]:
     return [
         SportRef(
@@ -192,6 +205,7 @@ def map_packet_to_changes(
     version = idx["packet_version"]
     from_version = idx["from_version"]
     changes: list[Change] = []
+    fixture_ids: list[int] = []
 
     for event in idx["events"]:
         if event.get("level") != 1:
@@ -201,6 +215,7 @@ def map_packet_to_changes(
         if sport_id is None:
             continue
 
+        fixture_ids.append(event["id"])
         changes.append(
             Change(
                 change_type=ChangeType.FIXTURE,
@@ -218,6 +233,27 @@ def map_packet_to_changes(
                     "place": event.get("place", "unknown"),
                     "priority": event.get("priority"),
                     "event_num": event.get("num"),
+                },
+            )
+        )
+
+    # Every fixture gets a betting status: eventBlocks override, else unblocked.
+    for match_id in fixture_ids:
+        block = _block_for_match(
+            match_id,
+            idx["event_blocks"],
+            idx["events_by_id"],
+            known,
+        )
+        changes.append(
+            Change(
+                change_type=ChangeType.BETTING_STATUS,
+                match_payload_id=match_id,
+                packet_version=version,
+                from_version=from_version,
+                payload={
+                    "state": (block or {}).get("state", "unblocked"),
+                    "partial_factor_ids": (block or {}).get("factors"),
                 },
             )
         )
@@ -264,25 +300,27 @@ def map_packet_to_changes(
                 )
             )
 
-        block = None
-        for event_id, payload in idx["event_blocks"].items():
-            if resolve_match_id_for_update(event_id, idx["events_by_id"], known) == match_id:
-                block = payload
-                break
-
-        if block:
-            changes.append(
-                Change(
-                    change_type=ChangeType.BETTING_STATUS,
-                    match_payload_id=match_id,
-                    packet_version=version,
-                    from_version=from_version,
-                    payload={
-                        "state": block.get("state", "unknown"),
-                        "partial_factor_ids": block.get("factors"),
-                    },
-                )
+        # eventBlocks may arrive for known matches not re-listed in events[] (deltas).
+        if match_id not in fixture_ids:
+            block = _block_for_match(
+                match_id,
+                idx["event_blocks"],
+                idx["events_by_id"],
+                known,
             )
+            if block:
+                changes.append(
+                    Change(
+                        change_type=ChangeType.BETTING_STATUS,
+                        match_payload_id=match_id,
+                        packet_version=version,
+                        from_version=from_version,
+                        payload={
+                            "state": block.get("state", "unknown"),
+                            "partial_factor_ids": block.get("factors"),
+                        },
+                    )
+                )
 
     for entry in idx["custom_factors"]:
         market_event_id = entry["e"]
@@ -348,6 +386,34 @@ def map_packet_to_changes(
                         }
                         for o in market.outcomes
                     ],
+                },
+            )
+        )
+
+    # Odds-only deltas never re-list fixtures; still emit a status so STATE is not null.
+    status_ids = {
+        c.match_payload_id
+        for c in changes
+        if c.change_type == ChangeType.BETTING_STATUS
+    }
+    for match_id in {
+        c.match_payload_id for c in changes if c.change_type == ChangeType.ODDS
+    } - status_ids:
+        block = _block_for_match(
+            match_id,
+            idx["event_blocks"],
+            idx["events_by_id"],
+            known,
+        )
+        changes.append(
+            Change(
+                change_type=ChangeType.BETTING_STATUS,
+                match_payload_id=match_id,
+                packet_version=version,
+                from_version=from_version,
+                payload={
+                    "state": (block or {}).get("state", "unblocked"),
+                    "partial_factor_ids": (block or {}).get("factors"),
                 },
             )
         )

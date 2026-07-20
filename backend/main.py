@@ -21,13 +21,14 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.add_parser(
         "poll",
         help=(
-            "Poll bookmaker API — fonbet, ligastavok, bet365, betcity, "
-            "betcity-line, lxbet-line, or lxbet-live"
+            "Poll bookmaker API — fonbet, ligastavok-live, ligastavok-line, bet365, "
+            "bet365-line, betcity-live, betcity-line, lxbet-line, or lxbet-live"
         ),
         description=(
             "Poll bookmaker API and import to PostgreSQL. "
             "Usage: python main.py poll "
-            "[fonbet|ligastavok|bet365|betcity|betcity-line|lxbet-line|lxbet-live] ..."
+            "[fonbet|ligastavok-live|ligastavok-line|bet365|bet365-line|"
+            "betcity-live|betcity-line|lxbet-line|lxbet-live] ..."
         ),
     )
     sub.add_parser(
@@ -109,12 +110,18 @@ def _run_poll(argv: list[str]) -> None:
         rest = argv[1:] if argv and argv[0].lower() in ("fonbet", "fontbet") else argv
         sys.argv = ["poll", *rest]
         from fonbet.poll import main as poll_main
-    elif bookmaker == "ligastavok":
+    elif bookmaker in ("ligastavok", "ligastavok-live", "ligastavok_live", "ligastavoklive"):
         sys.argv = ["poll", *argv[1:]]
-        from ligastavok.poll import main as poll_main
+        from ligastavok_live.poll import main as poll_main
+    elif bookmaker in ("ligastavok-line", "ligastavok_line", "ligastavokline"):
+        sys.argv = ["poll", *argv[1:]]
+        from ligastavok_line.poll import main as poll_main
     elif bookmaker == "bet365":
         sys.argv = ["poll", *argv[1:]]
         from bet365.poll import main as poll_main
+    elif bookmaker in ("bet365-line", "bet365_line", "bet365line"):
+        sys.argv = ["poll", *argv[1:]]
+        from bet365_line.poll import main as poll_main
     elif bookmaker in ("betcity-line", "betcity_line", "betcityline"):
         sys.argv = ["poll", *argv[1:]]
         from betcity_line.poll import main as poll_main
@@ -139,13 +146,14 @@ def _run_poll(argv: list[str]) -> None:
         # Bare 1xbet/lxbet defaults to live (dashboard Live tab).
         sys.argv = ["poll", *argv[1:]]
         from lxbet_live.poll import main as poll_main
-    elif bookmaker == "betcity":
+    elif bookmaker in ("betcity", "betcity-live", "betcity_live", "betcitylive"):
         sys.argv = ["poll", *argv[1:]]
         from betcity_live.poll import main as poll_main
     elif argv and not argv[0].startswith("-"):
         raise SystemExit(
             "Usage: python main.py poll "
-            "[fonbet|ligastavok|bet365|betcity|betcity-line|lxbet-line|lxbet-live] "
+            "[fonbet|ligastavok-live|ligastavok-line|bet365|bet365-line|"
+            "betcity-live|betcity-line|lxbet-line|lxbet-live] "
             "[options]\n"
             f"Unknown bookmaker: {argv[0]!r}"
         )
@@ -158,9 +166,9 @@ def _run_poll(argv: list[str]) -> None:
 
 
 def _run_adapter(argv: list[str]) -> None:
-    if argv and argv[0] == "ligastavok":
+    if argv and argv[0] in ("ligastavok", "ligastavok-live"):
         sys.argv = ["adapter", *argv[1:]]
-        from ligastavok.run_adapter import main as adapter_main
+        from ligastavok_live.run_adapter import main as adapter_main
     else:
         sys.argv = ["adapter", *argv]
         from fonbet.run_adapter import main as adapter_main
@@ -169,10 +177,30 @@ def _run_adapter(argv: list[str]) -> None:
 
 
 def _run_fetch(argv: list[str]) -> None:
-    if not argv or argv[0] != "ligastavok":
-        raise SystemExit("Usage: python main.py fetch ligastavok [--ns live|prematch] [--curl file.curl]")
-    sys.argv = ["fetch", *argv[1:]]
-    from ligastavok.fetch_snapshot import main as fetch_main
+    if not argv or argv[0] not in (
+        "ligastavok",
+        "ligastavok-live",
+        "ligastavok_live",
+        "ligastavok-line",
+        "ligastavok_line",
+    ):
+        raise SystemExit(
+            "Usage: python main.py fetch ligastavok-live|ligastavok-line "
+            "[--ns live|prematch] [--curl file.curl]"
+        )
+    bookmaker = argv[0].replace("_", "-")
+    rest = argv[1:]
+    # Default ns from package when not passed.
+    if bookmaker.endswith("-line") and "--ns" not in rest:
+        rest = ["--ns", "prematch", *rest]
+    elif bookmaker.endswith("-live") or bookmaker == "ligastavok":
+        if "--ns" not in rest:
+            rest = ["--ns", "live", *rest]
+    sys.argv = ["fetch", *rest]
+    if "line" in bookmaker:
+        from ligastavok_line.fetch_snapshot import main as fetch_main
+    else:
+        from ligastavok_live.fetch_snapshot import main as fetch_main
 
     fetch_main()
 

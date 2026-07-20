@@ -20,7 +20,7 @@ Configure URLs via `backend/.env` (`FONBET_LIST_LIGHT_URL`, `FONBET_LIST_URL_BAS
 | `events` (level=1) | `EventRef` / `ChangeType.FIXTURE` |
 | `eventMiscs` | `ChangeType.SCORE` |
 | `liveEventInfos` | `ChangeType.SCORE` (timer, subscores) |
-| `eventBlocks` | `ChangeType.BETTING_STATUS` |
+| `eventBlocks` | `ChangeType.BETTING_STATUS` (override). Missing → default `unblocked` for every fixture |
 | `customFactors` | `ChangeType.ODDS` |
 
 ## Fonbet-specific notes

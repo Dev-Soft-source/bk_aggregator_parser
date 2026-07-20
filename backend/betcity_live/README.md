@@ -31,13 +31,12 @@ python main.py poll betcity --direct
 python main.py listen betcity --direct --seconds 30 --save
 ```
 
-## Browser mode (default for poll)
-
-`python main.py poll betcity` opens CDP Chrome (port **9224**), loads the live page, then **keeps tapping** `sc.betcity.ru` frames while Chrome stays open.
+Browser mode is the default for poll (`python main.py poll betcity-live`).
 
 ```powershell
 cd backend
-python main.py poll betcity
+python main.py poll betcity-live
+# alias: python main.py poll betcity
 ```
 
 With proxy:
@@ -46,7 +45,7 @@ With proxy:
 cd backend
 $env:BETCITY_PROXY = "1.2.3.4:8080"
 .\scripts\start_chrome_cdp_betcity.ps1   # optional; poll also auto-starts Chrome
-python main.py poll betcity --proxy 1.2.3.4:8080
+python main.py poll betcity-live --proxy 1.2.3.4:8080
 ```
 
 Leave the Chrome window open. Poll continues the socket tap automatically. If frames stop, press **F5** once on the live page.

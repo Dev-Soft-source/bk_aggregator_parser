@@ -16,6 +16,10 @@ class CookieBannerConfigTests(unittest.TestCase):
         self.assertIn("Nõustu kõigiga", _COOKIE_ACCEPT_LABELS)
         self.assertEqual(_COOKIE_ACCEPT_LABELS[0], "Nõustu kõigiga")
 
+    def test_romanian_accept_all_label_present(self) -> None:
+        self.assertIn("Acceptati toate", _COOKIE_ACCEPT_LABELS)
+        self.assertIn("Acceptați toate", _COOKIE_ACCEPT_LABELS)
+
     def test_config_cookie_banner_defaults(self) -> None:
         cfg = Bet365Config.from_env()
         self.assertTrue(cfg.cookie_banner_auto_click)

@@ -52,6 +52,51 @@ def is_cloudflare_challenge(
     return any(marker in body_lower for marker in _CHALLENGE_BODY_MARKERS)
 
 
+_USA_GEO_URL_MARKERS: tuple[str, ...] = (
+    "/usa",
+    "isocode=us",
+    "gcsid=",
+)
+
+_USA_GEO_BODY_MARKERS: tuple[str, ...] = (
+    "where do you want to play",
+    "never ordinary",
+)
+
+
+def is_usa_geo_gate(
+    *,
+    url: str = "",
+    title: str = "",
+    body_text: str = "",
+) -> bool:
+    """True on bet365 US state-picker splash (no ZAP feed)."""
+    url_lower = (url or "").lower()
+    if "bet365.com" not in url_lower:
+        return False
+    if any(marker in url_lower for marker in _USA_GEO_URL_MARKERS):
+        return True
+    body_lower = (body_text or "").lower()
+    if "where do you want to play" in body_lower:
+        return True
+    if "never ordinary" in body_lower and any(
+        state in body_lower
+        for state in ("new jersey", "colorado", "ohio", "virginia", "iowa")
+    ):
+        return True
+    title_lower = (title or "").lower()
+    return "where do you want to play" in title_lower
+
+
+def geo_gate_user_message(*, live_cdp_url: str = "http://127.0.0.1:9223") -> str:
+    return (
+        "Bet365 US geo gate detected (bet365.com/usa — no line feed).\n"
+        f"  Keep live Chrome running on {live_cdp_url} (#/HO/), then retry.\n"
+        "  The line poller copies bet365 cookies from live Chrome automatically.\n"
+        "  Do not click US state buttons."
+    )
+
+
 def is_bet365_authenticated(
     *,
     url: str = "",
@@ -61,6 +106,8 @@ def is_bet365_authenticated(
     has_cf_clearance: bool = False,
 ) -> bool:
     """True when bet365 passed Cloudflare (entry page), before live hub."""
+    if is_usa_geo_gate(url=url, title=title, body_text=body_text):
+        return False
     if has_pstk or has_cf_clearance:
         return True
     if is_cloudflare_challenge(url=url, title=title, body_text=body_text):
@@ -85,6 +132,8 @@ def is_bet365_live_ready(
     """True when bet365 appears loaded past Cloudflare."""
     if is_cloudflare_challenge(url=url, title=title, body_text=body_text):
         return False
+    if is_usa_geo_gate(url=url, title=title, body_text=body_text):
+        return False
 
     url_lower = (url or "").lower()
     if "bet365.com" not in url_lower:
@@ -93,7 +142,7 @@ def is_bet365_live_ready(
     if has_zap_socket or has_pstk:
         return True
 
-    return any(token in url for token in ("#/HO/", "#/IP/", "#/I/", "#/AC/"))
+    return is_live_hub_url(url)
 
 
 def is_bet365_ready(
@@ -115,7 +164,11 @@ def is_bet365_ready(
 
 
 def is_live_hub_url(url: str) -> bool:
-    return any(token in (url or "") for token in ("#/HO/", "#/IP/", "#/I/", "#/AC/"))
+    return any(
+        token in (url or "")
+        # #/AS/ = Asian / sports book list (prematch line after clicking Fotbal)
+        for token in ("#/HO/", "#/AO/", "#/AS/", "#/IP/", "#/I/", "#/AC/")
+    )
 
 
 def challenge_user_message(

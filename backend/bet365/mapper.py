@@ -111,11 +111,20 @@ def _sport_payload_id(event: EventState, state: ZapFeedState) -> int:
     return 0
 
 
-def _event_ref(event: EventState, state: ZapFeedState) -> EventRef:
+def _event_ref(
+    event: EventState,
+    state: ZapFeedState,
+    *,
+    force_place: str | None = None,
+) -> EventRef:
     team1, team2 = event.team1, event.team2
     if not team1 and not team2 and event.name:
         team1, team2 = parse_match_teams(event.name)
     league_id = int(event.fields.get("C2") or event.fields.get("C3") or 0)
+    if force_place is not None:
+        place = force_place
+    else:
+        place = "live" if event.live else "line"
     return EventRef(
         payload_id=event.fi,
         sport_payload_id=_sport_payload_id(event, state),
@@ -123,7 +132,7 @@ def _event_ref(event: EventState, state: ZapFeedState) -> EventRef:
         team1=team1,
         team2=team2,
         start_time_unix=None,
-        place="live" if event.live else "line",
+        place=place,
     )
 
 
@@ -251,12 +260,13 @@ def map_state_to_changes(
     *,
     version: int | None = None,
     live_only: bool = False,
+    force_place: str | None = None,
 ) -> list[Change]:
     packet_version = version if version is not None else state.frame_count
     changes: list[Change] = []
 
     for event in state.export_events(live_only=live_only):
-        ref = _event_ref(event, state)
+        ref = _event_ref(event, state, force_place=force_place)
         sport_name = state.sport_name(event)
 
         changes.append(

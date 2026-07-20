@@ -1,104 +1,138 @@
+A bookmaker line parsing system that ingests live and pre-match sports data from bookmaker sites, normalizes it into a canonical model in PostgreSQL, and reviews it in a web UI.
 
-<<<<<<< HEAD
-A bookmaker line parsing system for ingesting live sports data from bookmaker sites, normalizing it into a canonical model, and reviewing it in a web UI. The current focus is the **CORE layer** plus a **review frontend** — partner delivery (AMQP, multi-tenant HTTP API) is planned for a later phase.
+Supported bookmakers (each as its own adapter package under `backend/`):
 
-The first supported bookmaker is **Fonbet** (`fonbet.com`). The architecture is designed so additional bookmakers can be added as separate adapter packages without changing core contracts.
+| Bookmaker | Live | Line (prematch) | Site name |
+|-----------|------|-----------------|-----------|
+| **Fonbet** | `python main.py poll fonbet` | same poll (`place` from packet) | `fonbet.com` |
+| **Liga Stavok** | `python main.py poll ligastavok-live` | `python main.py poll ligastavok-line` | `ligastavok.ru` |
+| **Bet365** | `python main.py poll bet365` | `python main.py poll bet365-line` | `bet365.com` |
+| **Betcity** | `python main.py poll betcity-live` | `python main.py poll betcity-line` | `betcity.ru` |
+| **1xBet** | `python main.py poll lxbet-live` | `python main.py poll lxbet-line` | `1xbet.com` |
+
+Partner delivery (AMQP, multi-tenant HTTP API) is planned for a later phase — see [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ## What it does
 
 | Layer | Role |
 |-------|------|
-| **Parser adapters** | Fetch raw line data from bookmaker APIs and map packets to normalized `Change` events |
+| **Parser adapters** | Fetch raw line data (HTTP / WebSocket / browser CDP) and map packets to normalized `Change` events |
 | **Core / persistence** | Store matches, scores, betting status, and odds in PostgreSQL (`booker_adapter`) |
-| **Review frontend** | Next.js dashboard to browse live matches, scores, and odds in near real time |
+| **Review frontend** | Next.js dashboard — filter by site and place (`live` / `line`), scores, odds, betting state |
 
-**Current scope:** ingest **two odds per match** (main 2-way line; default Fonbet factors `921` home + `923` away). Full market trees and partner delivery are out of scope for this phase.
+**Odds scope:** ingest main line outcomes (typically factors `921` / `922` / `923` for 1 / X / 2). Full market trees and partner delivery are out of scope for this phase.
+
+### Betting status (Fonbet)
+
+- Every fixture gets a `betting_status` row: `eventBlocks` overrides when present, otherwise default **`unblocked`**.
+- Odds-only delta packets also write status, so line matches do not show `—` in the UI after odds updates.
+- UI shows `Unblocked` / `Blocked` / `Partial`, or `—` when no status row exists yet.
 
 ## Architecture
 
 ```text
-┌──────────────────────────────────────────────────────────────┐
-│  Bookmaker sites (Fonbet, …)                                  │
-└────────────────────────────┬─────────────────────────────────┘
-                             │ public line API
-                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Adapter layer  (backend/fonbet/, backend/adapters/)          │
-│  listLight snapshot → list deltas → Change[]                  │
-└────────────────────────────┬─────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│  PostgreSQL  (booker_adapter)                                 │
-│  sites · sports · matches · scores · odds_lines · …         │
-└────────────────────────────┬─────────────────────────────────┘
-                             │
-                             ▼
-┌──────────────────────────────────────────────────────────────┐
-│  Review frontend  (Next.js, frontend/)                       │
-│  Polls /api/matches every few seconds                         │
-└──────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│  Bookmaker sites (Fonbet, Liga Stavok, Bet365, Betcity, 1xBet)   │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ HTTP / WS / CDP+ZAP
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Adapter packages  (backend/<bookmaker>/)                         │
+│  snapshot / deltas / sockets → Change[] or direct DB import     │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PostgreSQL  (booker_adapter)                                     │
+│  sites · sports · matches · match_scores · odds_lines ·           │
+│  betting_status · …                                               │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Review frontend  (Next.js, frontend/)                           │
+│  Polls /api/matches · site selector · place=live|line|all         │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-**Target rule:** adapters emit `Change[]`; core owns all database writes. The live poll path still uses `fonbet/importer.py` today; a dedicated `backend/core/` ingestion package is on the roadmap (see [WORKFLOW.md](WORKFLOW.md)).
+**Target rule:** adapters emit `Change[]`; core owns DB writes. Fonbet’s live poll path still uses `fonbet/importer.py` today; a shared `backend/core/` write path is on the roadmap.
 
 ## Prerequisites
 
 - **Python** 3.11+ (3.13 tested)
 - **Node.js** 20+ and npm
 - **PostgreSQL** 14+
+- **Chrome with CDP** for Bet365 / Liga Stavok / Betcity browser-assisted sessions (see adapter READMEs)
 
 ## Quick start
 
 ### 1. Database
 
-Create the `booker_adapter` database:
-
-```powershell
-psql -U postgres -d postgres -f backend/scripts/create_database.sql
+```sql
+CREATE DATABASE booker_adapter;
 ```
 
-Or run `CREATE DATABASE booker_adapter;` manually. Details: [docs/DATABASE.md](docs/DATABASE.md).
+Details: [docs/DATABASE.md](docs/DATABASE.md). Schema is applied by `python main.py setup` (or `--init-schema` / `--migrate` on import/poll).
 
 ### 2. Backend
 
 ```powershell
 cd backend
 copy .env.example .env
-# Edit DATABASE_URL and other settings in .env
+# Edit DATABASE_URL, SITE_NAME, and bookmaker-specific settings
 
 pip install -r requirements.txt
 python main.py setup
 ```
 
-`setup` initializes the schema, imports sample data from `fonbet/test.json`, and verifies the database.
+`setup` initializes the schema, imports sample Fonbet data from `fonbet/test.json`, and verifies the database.
 
 ### 3. Frontend
 
 ```powershell
 cd frontend
 copy .env.local.example .env.local
-# Use the same DATABASE_URL as backend
+# Same DATABASE_URL as backend; SITE_NAME filters the default site
 
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000). Use the site selector for Fonbet, Liga Stavok, Bet365, Betcity, or 1xBet.
 
 ### 4. Live data (daily use)
 
-Run in two terminals:
+Run a poller for each bookmaker you care about, plus the UI:
 
 ```powershell
-# Terminal 1 — poll Fonbet live API → PostgreSQL
+# Terminal 1 — example: Fonbet
 cd backend
 python main.py poll fonbet
-# also works: python main.py poll
 
 # Terminal 2 — review UI
 cd frontend
 npm run dev
+```
+
+Other pollers (separate terminals / hosts as needed):
+
+```powershell
+python main.py poll ligastavok-live
+python main.py poll ligastavok-line
+python main.py poll bet365          # Chrome CDP port 9223
+python main.py poll bet365-line     # Chrome CDP port 9225
+python main.py poll betcity-live    # Chrome CDP (default); alias: betcity
+python main.py poll betcity-line
+python main.py poll lxbet-live
+python main.py poll lxbet-line
+```
+
+Bet365 CDP helpers:
+
+```powershell
+cd backend
+.\scripts\start_chrome_cdp_bet365.ps1       # live → 9223
+.\scripts\start_chrome_cdp_bet365_line.ps1  # line → 9225
 ```
 
 ## Backend CLI
@@ -108,39 +142,47 @@ All commands run from `backend/`:
 | Command | Description |
 |---------|-------------|
 | `python main.py setup` | Phase 0: schema + sample import + verification |
-| `python main.py import <file.json>` | Import a Fonbet JSON packet (`--init-schema`, `--migrate` optional) |
-| `python main.py poll fonbet` | Poll Fonbet live API and write to PostgreSQL |
-| `python main.py adapter <file.json>` | Map packet to `Change[]` without touching the DB |
-| `python main.py adapter --live --once` | Fetch one live packet and print changes |
+| `python main.py import <file.json>` | Import a Fonbet JSON packet |
+| `python main.py poll <bookmaker>` | Poll and write to PostgreSQL (see table above) |
+| `python main.py adapter <file.json>` | Map Fonbet packet to `Change[]` (no DB) |
+| `python main.py adapter ligastavok …` | Liga Stavok adapter debug |
+| `python main.py fetch ligastavok` | Download Liga Stavok snapshot JSON |
+| `python main.py listen bet365 \| betcity` | Stream WebSocket frames (debug) |
+| `python main.py capture bet365` | Capture Bet365 `uid` + cookie from CDP Chrome |
 
-Legacy shortcuts: `python main.py fonbet/test.json` (import), `python main.py --poll` (poll).
+Legacy shortcuts: `python main.py fonbet/test.json` (import), `python main.py --poll` (Fonbet poll).
 
 ### Tests
 
 ```powershell
 cd backend
 python -m unittest discover -s fonbet/tests -v
+python -m unittest discover -s bet365/tests -v
+# other adapters ship tests under backend/<adapter>/tests/
 ```
 
-### Adapter-only debug (no database)
+### Adapter docs
 
-```powershell
-cd backend
-python main.py adapter fonbet/test.json
-python main.py adapter --live --once
-```
-
-Fonbet-specific API notes and module layout: [backend/fonbet/README.md](backend/fonbet/README.md).
+| Package | README |
+|---------|--------|
+| Fonbet | [backend/fonbet/README.md](backend/fonbet/README.md) |
+| Liga Stavok live | [backend/ligastavok_live/README.md](backend/ligastavok_live/README.md) |
+| Liga Stavok line | [backend/ligastavok_line/README.md](backend/ligastavok_line/README.md) |
+| Bet365 live | [backend/bet365/README.md](backend/bet365/README.md) |
+| Bet365 line | [backend/bet365_line/README.md](backend/bet365_line/README.md) |
+| Betcity live | [backend/betcity_live/README.md](backend/betcity_live/README.md) |
+| Betcity line | [backend/betcity_line/README.md](backend/betcity_line/README.md) |
+| 1xBet live | [backend/lxbet_live/README.md](backend/lxbet_live/README.md) |
+| 1xBet line | [backend/lxbet_line/README.md](backend/lxbet_line/README.md) |
 
 ## Frontend API
-
-The Next.js app exposes read-only routes backed by PostgreSQL:
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/matches?place=live` | Live matches with scores and odds |
 | `GET /api/matches?place=line` | Pre-match |
 | `GET /api/matches?place=all` | All places |
+| `GET /api/matches?site=fonbet.com` | Filter by site (`all` for every site) |
 
 More detail: [frontend/README.md](frontend/README.md).
 
@@ -148,24 +190,27 @@ More detail: [frontend/README.md](frontend/README.md).
 
 ### Backend (`backend/.env`)
 
+Copy from [backend/.env.example](backend/.env.example). Common variables:
+
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | PostgreSQL connection string |
-| `SITE_NAME` | Bookmaker site label (default `fonbet.com`) |
-| `FONBET_ODDS_FACTOR_IDS` | Two factor IDs to ingest (default `921,923`) |
-| `FONBET_LIST_LIGHT_URL` | Fonbet snapshot endpoint |
-| `FONBET_LIST_URL_BASE` | Fonbet delta endpoint base URL |
-| `POLL_INTERVAL_SECONDS` | Poll loop interval |
+| `SITE_NAME` | Default site label for imports (`fonbet.com`, `bet365.com`, …) |
+| `FONBET_ODDS_FACTOR_IDS` | Factor IDs to ingest (default `921,922,923`) |
+| `FONBET_LIST_LIGHT_URL` / `FONBET_LIST_URL_BASE` | Fonbet snapshot / delta endpoints |
+| `POLL_INTERVAL_SECONDS` | Default poll interval (Fonbet) |
 | `RETAIN_SNAPSHOT_YEARS` | Audit snapshot retention |
+
+Bookmaker-specific blocks (Bet365 CDP, Liga Stavok cookies, Betcity WS, 1xBet URLs, etc.) are documented in `.env.example` and each adapter README.
 
 ### Frontend (`frontend/.env.local`)
 
 | Variable | Purpose |
 |----------|---------|
 | `DATABASE_URL` | Same database as backend |
-| `SITE_NAME` | Site filter |
-| `ODDS_FACTOR_IDS` | Factor IDs shown in the UI |
-| `NEXT_PUBLIC_POLL_INTERVAL_MS` | UI refresh interval (default `5000`) |
+| `SITE_NAME` | Default site filter |
+| `ODDS_FACTOR_IDS` | Factor IDs shown in the UI (`921,922,923`) |
+| `NEXT_PUBLIC_POLL_INTERVAL_MS` | UI refresh interval |
 
 Do not commit `.env` or `.env.local`.
 
@@ -174,47 +219,46 @@ Do not commit `.env` or `.env.local`.
 ```text
 bk_aggregator_parser/
 ├── backend/
-│   ├── main.py              # CLI entry point
-│   ├── config.py            # DatabaseConfig
-│   ├── db.py                # Connection, schema helpers
-│   ├── schema.sql           # PostgreSQL DDL
-│   ├── adapters/            # Shared Change DTOs and adapter protocol
-│   ├── fonbet/              # Fonbet adapter, mapper, poll, importer
-│   └── scripts/             # DB creation, Phase 0 setup
-├── frontend/                # Next.js review UI
-├── docs/
-│   ├── DATABASE.md          # Database setup guide
-│   └── REVIEW.md            # Project walkthrough
-├── WORKFLOW.md              # Development phases and architecture target
-├── TODO.md                  # Executable checklist
-└── TZ_bookmaker_parsing_COMPLETE_EN.md   # Full client spec (reference)
+│   ├── main.py                 # CLI entry point
+│   ├── config.py / db.py       # DB config and helpers
+│   ├── schema.sql              # PostgreSQL DDL
+│   ├── adapters/               # Shared Change DTOs
+│   ├── core/                   # Shared apply_changes helpers
+│   ├── fonbet/                 # Fonbet HTTP poll + importer
+│   ├── ligastavok_live/        # Liga Stavok live (self-contained)
+│   ├── ligastavok_line/        # Liga Stavok prematch (self-contained)
+│   ├── bet365/                 # Bet365 live ZAP + CDP
+│   ├── bet365_line/            # Bet365 prematch (#/AO/, #/AS/)
+│   ├── betcity_live/           # Betcity live WS
+│   ├── betcity_line/           # Betcity prematch HTTP
+│   ├── lxbet_live/ / lxbet_line/
+│   └── scripts/                # CDP Chrome launchers, Phase 0 setup
+├── frontend/                   # Next.js review UI
+└── docs/                       # Specs, workflow, DB guide
 ```
 
 ## Documentation
 
 | Document | Contents |
 |----------|----------|
-| [WORKFLOW.md](WORKFLOW.md) | Phases A–G, architecture target, quality gates |
-| [TODO.md](TODO.md) | Step-by-step tasks and checklists |
+| [docs/WORKFLOW.md](docs/WORKFLOW.md) | Phases, architecture target, quality gates |
+| [docs/TODO.md](docs/TODO.md) | Step-by-step tasks |
 | [docs/DATABASE.md](docs/DATABASE.md) | `booker_adapter` setup and schema overview |
-| [docs/REVIEW.md](docs/REVIEW.md) | Codebase walkthrough before coding |
-| [TZ_bookmaker_parsing_COMPLETE_EN.md](TZ_bookmaker_parsing_COMPLETE_EN.md) | Full technical specification (future phases) |
-| [Appendix_A_sports_EN.md](Appendix_A_sports_EN.md) | 207 sports → `sr:sport:N` reference |
-| [Appendix_C_markets_EN.md](Appendix_C_markets_EN.md) | Market definitions (incremental mapping) |
+| [docs/REVIEW.md](docs/REVIEW.md) | Codebase walkthrough |
+| [docs/TZ_bookmaker_parsing_COMPLETE_EN.md](docs/TZ_bookmaker_parsing_COMPLETE_EN.md) | Full technical specification |
+| [docs/Appendix_A_sports_EN.md](docs/Appendix_A_sports_EN.md) | Sports → `sr:sport:N` reference |
+| [docs/Appendix_C_markets_EN.md](docs/Appendix_C_markets_EN.md) | Market definitions |
 
 ## Roadmap (this phase)
 
-1. **Fonbet adapter** — stable `listLight` + delta streaming with tests
-2. **Core ingestion** — single write path from `Change[]` to PostgreSQL
-3. **URN / market mapping** — `payload_id` ↔ URN, subset of `market_id`
-4. **Core read API** — dedicated HTTP API for the frontend
-5. **Review UI** — site selector, match detail, mapping status
-6. **Second bookmaker** (optional) — new folder under `backend/<bookmaker>/`
+1. Stable multi-bookmaker pollers with tests
+2. Shared core ingestion from `Change[]` for all adapters
+3. URN / market mapping (`payload_id` ↔ URN, Appendix C subset)
+4. Dedicated core read API for the frontend
+5. Review UI polish (detail views, mapping status)
 
-Out of scope until CORE is stable: RabbitMQ unified feed, partner HTTP API, arbitrage, admin panel, multi-tenant delivery. See [WORKFLOW.md](WORKFLOW.md) §5.
+Out of scope until CORE is stable: RabbitMQ unified feed, partner HTTP API, arbitrage, admin panel, multi-tenant delivery. See [docs/WORKFLOW.md](docs/WORKFLOW.md).
 
 ## License
 
 Not specified in the repository. Add a license file if you intend to distribute this project.
-=======
->>>>>>> 5f63ea7431d30b7820e899815f804b3ccdfa7cb2
