@@ -22,14 +22,28 @@ OUTCOME_LABEL_BY_OR: dict[int, str] = {
 }
 
 # Primary win-market names (map to 921/922/923 for frontend).
+# Include common locales — Bet365 CDP may serve RO/EN names.
 PRIMARY_MARKET_NAMES: frozenset[str] = frozenset(
     {
         "Fulltime Result",
         "Match Winner",
         "Money Line",
+        "Moneyline",
         "To Win",
         "Match Result",
         "Winner",
+        "Rezultat final",
+        "Castigator meci",
+        "Câștigător meci",
+    }
+)
+
+# Known primary market IDs (soccer FT / tennis MW / basketball ML variants).
+PRIMARY_MARKET_IDS: frozenset[int] = frozenset(
+    {
+        1777,  # Soccer Fulltime Result
+        1763,  # Tennis Match Winner
+        1453,  # Basketball Money Line (common)
     }
 )
 
@@ -60,3 +74,9 @@ def is_primary_market(name: str | None) -> bool:
     if not name:
         return False
     return name.strip() in PRIMARY_MARKET_NAMES
+
+
+def is_primary_market_id(market_id: int | None) -> bool:
+    if market_id is None:
+        return False
+    return int(market_id) in PRIMARY_MARKET_IDS

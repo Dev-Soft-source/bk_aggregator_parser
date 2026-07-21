@@ -12,6 +12,7 @@ from bet365.odds_config import (
     OUTCOME_FACTOR_BY_OR,
     import_all_from_socket,
     is_primary_market,
+    is_primary_market_id,
     main_market_id,
     main_market_name,
 )
@@ -136,43 +137,21 @@ def _event_ref(
     )
 
 
-def _looks_like_match_result(
-    selections: list[SelectionState],
-    market_name: str | None,
-) -> bool:
-    """Two/three-way winner market (not handicap/total)."""
-    if market_name:
-        lower = market_name.lower()
-        if any(
-            token in lower
-            for token in (
-                "over",
-                "under",
-                "handicap",
-                "total",
-                "corner",
-                "card",
-                "booking",
-                "game ",
-                "set ",
-                "point",
-            )
-        ):
-            return False
-    if any(sel.fields.get("HA") for sel in selections):
-        return False
-    orders = sorted(s.order for s in selections if s.order is not None)
-    return orders in ([0, 1], [0, 1, 2])
-
-
 def _use_standard_factors(
     market_id: int,
     market_name: str | None,
     selections: list[SelectionState],
 ) -> bool:
-    if is_primary_market(market_name) or market_id == main_market_id():
+    """
+    Only primary win markets use shared 921/922/923 slots.
+
+    Mapping HT / DC / BTTS / period markets into those slots overwrote
+    Fulltime Result in the UI (frontend collapses by factor_id only).
+    """
+    del selections  # keep signature stable for callers
+    if is_primary_market_id(market_id) or market_id == main_market_id():
         return True
-    return _looks_like_match_result(selections, market_name)
+    return is_primary_market(market_name)
 
 
 def _display_factor_id(order: int | None, n_outcomes: int) -> int | None:
@@ -191,8 +170,9 @@ def _selection_outcome_dict(
     standard_factors: bool,
     n_outcomes: int,
 ) -> dict[str, Any] | None:
-    if sel.odds_decimal is None or sel.suspended:
+    if sel.odds_decimal is None:
         return None
+    # Keep last OD while SU=1 — Bet365 UI still displays those prices.
     pa_id = field_int(sel.fields, "ID")
     factor_id: int | None = None
     if standard_factors:
@@ -327,7 +307,10 @@ def map_state_to_changes(
             )
             if len(outcomes) < 1:
                 continue
-            open_outcomes += len(outcomes)
+            # Betting open only when at least one selection is not suspended.
+            open_outcomes += sum(
+                1 for s in selections if s.odds_decimal is not None and not s.suspended
+            )
             display_market = market_name or f"Market {market_id}"
             changes.append(
                 Change(

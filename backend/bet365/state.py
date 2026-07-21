@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +57,7 @@ class EventState:
     timer_secs: int | None = None
     timer_ticking: bool | None = None
     timer_tu: str | None = None
+    match_length: int | None = None  # ML — regulation minutes (soccer usually 90)
     live: bool = False
     team1: str | None = None
     team2: str | None = None
@@ -152,6 +154,8 @@ class ZapFeedState:
             event.timer_ticking = fields.get("TT") == "1"
         if fields.get("TU"):
             event.timer_tu = fields["TU"]
+        if fields.get("ML") is not None:
+            event.match_length = field_int(fields, "ML")
         if fields.get("FS") is not None:
             event.live = fields.get("FS") == "1"
         if fields.get("IT"):
@@ -254,6 +258,8 @@ class ZapFeedState:
             if patch.get("TU"):
                 event.timer_tu = patch["TU"]
                 event.fields["TU"] = patch["TU"]
+            if patch.get("ML") is not None:
+                event.match_length = field_int(patch, "ML")
             if patch.get("FS") is not None:
                 event.live = patch.get("FS") == "1"
 
@@ -355,6 +361,12 @@ class ZapFeedState:
             if score and score not in {"0-0", "0-0,0-0"}:
                 return True
             return bool(event.minute is not None and event.minute > 0)
+
+        # Still FS=1 but regulation clock stopped at/after match length (e.g. soccer 90:00).
+        # Bet365 often keeps these open briefly after full time — drop from live UI.
+        if self._is_past_regulation(event):
+            return True
+
         # Still FS=1: finished only when priced selections were removed entirely.
         if self._event_has_odds(event):
             return False
@@ -366,6 +378,47 @@ class ZapFeedState:
         if still_has_priced_rows:
             return False
         return bool(event.score or event.minute is not None)
+
+    def _is_past_regulation(self, event: EventState) -> bool:
+        """
+        Past regulation with a frozen clock.
+
+        Real soccer: do NOT finish while prices remain (injury/VAR at 90+).
+        Esoccer: short games (6/8/12 min) linger at ML with last OD — drop them.
+        """
+        if event.minute is None:
+            return False
+        if event.timer_ticking is True:
+            return False
+        ml = event.match_length
+        if ml is None and self._is_esoccer(event):
+            ml = self._infer_esoccer_match_length(event)
+        if ml is None and event.sport_class == soccer_class_id():
+            ml = 90
+        if ml is None or event.minute < ml:
+            return False
+        # Virtual esoccer ends when the short clock hits ML (no injury time).
+        if self._is_esoccer(event):
+            return True
+        # Still priced → keep live (FT linger with odds, or stoppage pause).
+        if self._event_has_odds(event):
+            return False
+        market_fi = self.market_fi(event)
+        if any(
+            s.fi == market_fi and s.odds_decimal is not None
+            for s in self.selections.values()
+        ):
+            return False
+        return True
+
+    @staticmethod
+    def _infer_esoccer_match_length(event: EventState) -> int | None:
+        """Parse 'Joc de 8 minute' / '8 minute' from competition when ML missing."""
+        comp = event.competition or ""
+        match = re.search(r"(\d+)\s*minute", comp, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+        return None
 
     def _export_all_events(self, *, live_only: bool) -> list[EventState]:
         result: list[EventState] = []
@@ -390,18 +443,42 @@ class ZapFeedState:
         )
         return result
 
+    def _resolve_ma_id(self, sel: SelectionState, market_fi: int) -> int | None:
+        """Market id for a PA row — including orphans missing MA linkage."""
+        if sel.ma_id is not None:
+            return sel.ma_id
+        market_ids = {
+            m.market_id
+            for m in self.markets.values()
+            if m.fi == market_fi and m.market_id is not None
+        }
+        if len(market_ids) == 1:
+            return next(iter(market_ids))
+        # Delta feeds often update PA without an MA parent; OR 0/1/2 ⇒ primary.
+        if sel.order is not None and sel.order in (0, 1, 2):
+            return main_market_id()
+        return None
+
     def markets_with_odds(
         self, event: EventState
     ) -> list[tuple[int, str | None, list[SelectionState]]]:
-        """All markets on an event that have at least one priced selection."""
+        """All markets on an event that have at least one priced selection.
+
+        Includes suspended rows that still carry a last OD (Bet365 UI keeps
+        showing those prices). Orphan PA rows without ma_id are attributed via
+        `_resolve_ma_id` so esoccer mid-match deltas still export 1/X/2.
+        """
         market_fi = self.market_fi(event)
         by_market: dict[int, list[SelectionState]] = {}
         for sel in self.selections.values():
-            if sel.fi != market_fi or sel.odds_decimal is None or sel.suspended:
+            if sel.fi != market_fi or sel.odds_decimal is None:
+                continue
+            ma_id = self._resolve_ma_id(sel, market_fi)
+            if ma_id is None:
                 continue
             if sel.ma_id is None:
-                continue
-            by_market.setdefault(sel.ma_id, []).append(sel)
+                sel.ma_id = ma_id
+            by_market.setdefault(ma_id, []).append(sel)
 
         result: list[tuple[int, str | None, list[SelectionState]]] = []
         for ma_id, sels in by_market.items():
@@ -428,9 +505,12 @@ class ZapFeedState:
         return " v " in lower or " vs " in lower or " @ " in lower
 
     def _event_has_odds(self, event: EventState) -> bool:
+        """True when we can export at least one priced market (incl. suspended)."""
         market_fi = self.market_fi(event)
         return any(
-            s.fi == market_fi and s.odds_decimal is not None and not s.suspended
+            s.fi == market_fi
+            and s.odds_decimal is not None
+            and self._resolve_ma_id(s, market_fi) is not None
             for s in self.selections.values()
         )
 
@@ -459,9 +539,9 @@ class ZapFeedState:
         market_fi = self.market_fi(event)
         by_order: dict[int, SelectionState] = {}
         for s in self.selections.values():
-            if s.fi != market_fi or s.ma_id != market_id or s.odds_decimal is None:
+            if s.fi != market_fi or s.odds_decimal is None or s.order is None:
                 continue
-            if s.order is None:
+            if self._resolve_ma_id(s, market_fi) != market_id:
                 continue
             by_order[s.order] = s
         return [by_order[k] for k in sorted(by_order)]
@@ -469,7 +549,9 @@ class ZapFeedState:
     def _has_main_market(self, event: EventState, market_id: int) -> bool:
         market_fi = self.market_fi(event)
         return any(
-            s.fi == market_fi and s.ma_id == market_id and s.odds_decimal is not None
+            s.fi == market_fi
+            and s.odds_decimal is not None
+            and self._resolve_ma_id(s, market_fi) == market_id
             for s in self.selections.values()
         )
 

@@ -134,6 +134,61 @@ class ZapStateTests(unittest.TestCase):
             changes = map_state_to_changes(state)
         status = next(c for c in changes if c.change_type.value == "betting_status")
         self.assertEqual(status.payload["state"], "blocked")
+        odds = next(c for c in changes if c.change_type.value == "odds")
+        self.assertEqual(
+            [o["factor_id"] for o in odds.payload["outcomes"]],
+            [921, 922, 923],
+        )
+
+    def test_orphan_pa_without_ma_still_exports_1x2(self) -> None:
+        """Esoccer mid-match deltas often send PA rows with OD but no MA parent."""
+        import os
+        from unittest.mock import patch
+
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=198218415;CL=1;NA=Tunisia (Atlas) v Switzerland (Tiago);"
+            "CT=Esoccer GT Leagues;FS=1;SS=0-2;TM=5;OI=198218415;ML=12;|"
+            "PA;FI=198218415;ID=1;IT=L415-1;NA=Tunisia;OD=12/1;OR=0;SU=0;|"
+            "PA;FI=198218415;ID=2;IT=L415-2;NA=Draw;OD=10/1;OR=1;SU=0;|"
+            "PA;FI=198218415;ID=3;IT=L415-3;NA=Switzerland;OD=1/20;OR=2;SU=0;|"
+        )
+        with patch.dict(
+            os.environ,
+            {"BET365_IMPORT_ALL": "true", "BET365_SKIP_ESOCCER": "false"},
+        ):
+            changes = map_state_to_changes(state)
+        status = next(c for c in changes if c.change_type.value == "betting_status")
+        self.assertEqual(status.payload["state"], "unblocked")
+        odds = next(c for c in changes if c.change_type.value == "odds")
+        by_factor = {o["factor_id"]: o["odds"] for o in odds.payload["outcomes"]}
+        self.assertEqual(by_factor[921], 13.0)
+        self.assertEqual(by_factor[922], 11.0)
+        self.assertAlmostEqual(by_factor[923], 1.05, places=2)
+
+    def test_suspended_import_all_keeps_last_odds(self) -> None:
+        import os
+        from unittest.mock import patch
+
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=101;CL=1;NA=Home v Away;CT=Esoccer GT;FS=1;OI=201;|"
+            "MA;FI=201;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=201;ID=1;IT=L201-1_1;NA=Home;OD=12/1;OR=0;SU=1;|"
+            "PA;FI=201;ID=2;IT=L201-2_1;NA=Draw;OD=10/1;OR=1;SU=1;|"
+            "PA;FI=201;ID=3;IT=L201-3_1;NA=Away;OD=1/20;OR=2;SU=1;|"
+        )
+        with patch.dict(
+            os.environ,
+            {"BET365_IMPORT_ALL": "true", "BET365_SKIP_ESOCCER": "false"},
+        ):
+            changes = map_state_to_changes(state)
+        status = next(c for c in changes if c.change_type.value == "betting_status")
+        self.assertEqual(status.payload["state"], "blocked")
+        odds = next(c for c in changes if c.change_type.value == "odds")
+        self.assertEqual(len(odds.payload["outcomes"]), 3)
 
     def test_live_odds_removed_treated_finished(self) -> None:
         state = ZapFeedState()
@@ -143,6 +198,108 @@ class ZapStateTests(unittest.TestCase):
         )
         self.assertTrue(state._is_finished(state.events[901]))
         self.assertEqual(state.drop_finished_events(), 1)
+
+    def test_soccer_90_clock_stopped_with_odds_stays_live(self) -> None:
+        """FT linger / VAR pause at 90 with open odds — keep as live."""
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=911;CL=1;NA=Home v Away;CT=League;FS=1;SS=4-0;TM=90;TS=0;TT=0;ML=90;OI=912;|"
+            "MA;FI=912;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=912;ID=1;IT=L912-1_1;NA=Home;OD=1/100;OR=0;|"
+            "PA;FI=912;ID=2;IT=L912-2_1;NA=Draw;OD=50/1;OR=1;|"
+            "PA;FI=912;ID=3;IT=L912-3_1;NA=Away;OD=100/1;OR=2;|"
+        )
+        self.assertFalse(state._is_finished(state.events[911]))
+        self.assertEqual(len(state.export_events()), 1)
+        self.assertEqual(state.drop_finished_events(), 0)
+
+    def test_esoccer_at_match_length_finished_even_with_odds(self) -> None:
+        """Short esoccer games linger at 8:00 with last prices — drop from live."""
+        import os
+        from unittest.mock import patch
+
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=801;CL=1;NA=Home (A) v Away (B);"
+            "CT=Esoccer H2H GG League - Joc de 8 minute;"
+            "FS=1;SS=2-1;TM=8;TS=0;TT=0;ML=8;OI=802;|"
+            "MA;FI=802;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=802;ID=1;IT=L802-1_1;NA=Home;OD=1/100;OR=0;|"
+            "PA;FI=802;ID=2;IT=L802-2_1;NA=Draw;OD=50/1;OR=1;|"
+            "PA;FI=802;ID=3;IT=L802-3_1;NA=Away;OD=100/1;OR=2;|"
+        )
+        with patch.dict(os.environ, {"BET365_SKIP_ESOCCER": "false"}):
+            self.assertTrue(state._is_finished(state.events[801]))
+            self.assertEqual(state.export_events(), [])
+            self.assertEqual(state.drop_finished_events(), 1)
+
+    def test_soccer_90_clock_stopped_no_odds_finished(self) -> None:
+        """Past regulation, clock stopped, prices gone — drop from live."""
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=913;CL=1;NA=Home v Away;CT=League;FS=1;SS=4-0;TM=90;TS=0;TT=0;ML=90;OI=914;|"
+        )
+        self.assertTrue(state._is_finished(state.events[913]))
+        self.assertEqual(state.export_events(), [])
+        self.assertEqual(state.drop_finished_events(), 1)
+
+    def test_soccer_90_stoppage_still_live(self) -> None:
+        """Injury time: clock still ticking at 90+ — keep as live."""
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=921;CL=1;NA=Home v Away;CT=League;FS=1;SS=1-0;TM=90;TS=12;TT=1;ML=90;OI=922;|"
+            "MA;FI=922;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=922;ID=1;IT=L922-1_1;NA=Home;OD=1/10;OR=0;|"
+            "PA;FI=922;ID=2;IT=L922-2_1;NA=Draw;OD=10/1;OR=1;|"
+            "PA;FI=922;ID=3;IT=L922-3_1;NA=Away;OD=20/1;OR=2;|"
+        )
+        self.assertFalse(state._is_finished(state.events[921]))
+        self.assertEqual(len(state.export_events()), 1)
+        self.assertEqual(state.drop_finished_events(), 0)
+
+    def test_only_primary_market_uses_921_922_923(self) -> None:
+        """HT / period markets must not overwrite Fulltime Result factors."""
+        state = ZapFeedState()
+        state.sport_classes[1] = "Soccer"
+        state.apply_body(
+            "F|EV;FI=931;CL=1;NA=Home v Away;CT=League;FS=1;SS=1-0;TM=70;OI=932;|"
+            "MA;FI=932;ID=1777;NA=Fulltime Result;|"
+            "PA;FI=932;ID=1;IT=L932-1_1;NA=Home;OD=2/1;OR=0;|"
+            "PA;FI=932;ID=2;IT=L932-2_1;NA=Draw;OD=3/1;OR=1;|"
+            "PA;FI=932;ID=3;IT=L932-3_1;NA=Away;OD=4/1;OR=2;|"
+            "MA;FI=932;ID=10161;NA=Rezultat la pauza;|"
+            "PA;FI=932;ID=11;IT=L932-11_1;NA=Home;OD=10/1;OR=0;|"
+            "PA;FI=932;ID=12;IT=L932-12_1;NA=Draw;OD=5/1;OR=1;|"
+            "PA;FI=932;ID=13;IT=L932-13_1;NA=Away;OD=1/2;OR=2;|"
+        )
+        changes = map_state_to_changes(state)
+        odds_changes = [c for c in changes if c.change_type.value == "odds"]
+        factors_by_market: dict[int, list[int]] = {}
+        for change in odds_changes:
+            mid = int(change.payload.get("market_id") or 0)
+            factors_by_market[mid] = [
+                int(o["factor_id"]) for o in (change.payload.get("outcomes") or [])
+            ]
+        self.assertEqual(factors_by_market.get(1777), [921, 922, 923])
+        self.assertNotEqual(factors_by_market.get(10161), [921, 922, 923])
+
+    def test_tennis_match_winner_1763_maps_to_921_923(self) -> None:
+        state = ZapFeedState()
+        state.sport_classes[13] = "Tennis"
+        state.apply_body(
+            "F|EV;FI=941;CL=13;NA=Player A v Player B;FS=1;OI=942;|"
+            "MA;FI=942;ID=1763;NA=Market 1763;|"
+            "PA;FI=942;ID=10;IT=L942-10_1;NA=Player A;OD=10/11;OR=0;|"
+            "PA;FI=942;ID=11;IT=L942-11_1;NA=Player B;OD=10/11;OR=1;|"
+        )
+        changes = map_state_to_changes(state)
+        odds = next(c for c in changes if c.change_type.value == "odds")
+        factors = sorted(o["factor_id"] for o in odds.payload["outcomes"])
+        self.assertEqual(factors, [921, 923])
 
     def test_tennis_two_way_maps_to_921_923(self) -> None:
         state = ZapFeedState()

@@ -125,10 +125,32 @@ type MainOdds = {
   odd2: number | null;
 };
 
-/** Prefer 1/X/2 (921/922/923); fall back to other two-way winner markets. */
+/** Prefer 1/X/2 (921/922/923) from the primary market when several collide. */
 function pickDisplayOdds(lines: OddsLine[]): MainOdds {
-  const byFactor = new Map(lines.map((line) => [line.factorId, line.odds]));
-  if (byFactor.has(921) || byFactor.has(922) || byFactor.has(923)) {
+  const preferredMarkets = [1777, 1763, 1453, 1450, 1446, 910080, 920054, 780112, 170153];
+
+  const primary = lines.filter(
+    (line) =>
+      (line.factorId === 921 || line.factorId === 922 || line.factorId === 923) &&
+      !line.isHandicapTotal,
+  );
+  if (primary.length > 0) {
+    const byMarket = new Map<number | null, OddsLine[]>();
+    for (const line of primary) {
+      const key = line.lineParam;
+      const group = byMarket.get(key) ?? [];
+      group.push(line);
+      byMarket.set(key, group);
+    }
+    const ranked = [...byMarket.entries()].sort(([a], [b]) => {
+      const ia = a == null ? 99 : preferredMarkets.indexOf(a);
+      const ib = b == null ? 99 : preferredMarkets.indexOf(b);
+      const ra = ia === -1 ? 50 + (a ?? 9_999_999) : ia;
+      const rb = ib === -1 ? 50 + (b ?? 9_999_999) : ib;
+      return ra - rb;
+    });
+    const best = ranked[0]?.[1] ?? primary;
+    const byFactor = new Map(best.map((line) => [line.factorId, line.odds]));
     return {
       odd1: byFactor.get(921) ?? null,
       oddX: byFactor.get(922) ?? null,
@@ -155,7 +177,6 @@ function pickDisplayOdds(lines: OddsLine[]): MainOdds {
     byMarket.set(key, group);
   }
 
-  const preferredMarkets = [1777, 1763, 1450, 1446, 910080, 920054, 780112, 170153];
   const groups = [...byMarket.entries()]
     .filter(([, group]) => group.length >= 2)
     .sort(([a], [b]) => {
@@ -170,10 +191,11 @@ function pickDisplayOdds(lines: OddsLine[]): MainOdds {
     });
 
   for (const [, group] of groups) {
+    const sorted = [...group].sort((x, y) => x.factorId - y.factorId);
     return {
-      odd1: group[0]?.odds ?? null,
+      odd1: sorted[0]?.odds ?? null,
       oddX: null,
-      odd2: group[1]?.odds ?? null,
+      odd2: sorted[1]?.odds ?? null,
     };
   }
 
