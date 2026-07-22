@@ -123,9 +123,55 @@ class ZapFeedState:
             return
 
         if message.op == "D":
-            if message.path:
-                self.selections.pop(message.path, None)
-                self.markets.pop(message.path, None)
+            self._apply_delete(message.path)
+
+    @staticmethod
+    def _path_candidates(path: str | None) -> tuple[str, ...]:
+        """Possible state keys represented by a ZAP delta path."""
+        if not path:
+            return ()
+        candidates = [path]
+        if path.startswith("OV"):
+            candidates.append(path[2:])
+        if path.startswith("P") and "-" in path:
+            candidates.append(path[1:])
+        return tuple(dict.fromkeys(candidates))
+
+    def _apply_delete(self, path: str | None) -> None:
+        """Apply a ZAP delete and cascade cached children."""
+        candidates = self._path_candidates(path)
+        if not candidates:
+            return
+
+        for key in candidates:
+            if key in self.selections:
+                self.selections.pop(key, None)
+                return
+
+        for key in candidates:
+            market = self.markets.pop(key, None)
+            if market is None:
+                continue
+            drop_selections = [
+                it
+                for it, selection in self.selections.items()
+                if (
+                    selection.fi == market.fi
+                    and selection.ma_id == market.market_id
+                )
+            ]
+            for it in drop_selections:
+                self.selections.pop(it, None)
+            return
+
+        for key in candidates:
+            event = next(
+                (item for item in self.events.values() if item.it == key),
+                None,
+            )
+            if event is not None:
+                self._drop_event(event.fi)
+                return
 
     def _upsert_event(self, fields: dict[str, str]) -> EventState | None:
         fi = field_int(fields, "FI")

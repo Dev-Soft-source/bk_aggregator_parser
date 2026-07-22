@@ -348,6 +348,50 @@ class ZapStateTests(unittest.TestCase):
         self.assertEqual(sel.odds_frac, "9/4")
         self.assertAlmostEqual(sel.odds_decimal or 0, 3.25)
 
+    def test_delete_event_cascades_markets_and_selections(self) -> None:
+        state = ZapFeedState()
+        state.apply_body(
+            "F|EV;FI=999;CL=1;IT=L1-1-5-999_1_3;"
+            "NA=Home v Away;FS=1;OI=888;|"
+            "MA;FI=888;ID=1777;IT=L999-1777_1_3;NA=Fulltime Result;|"
+            "PA;FI=888;ID=1;IT=L888-1_1_3;NA=Home;OD=2/1;OR=0;|"
+        )
+
+        state.apply_chunk("\x15L1-1-5-999_1_3\x01D|")
+
+        self.assertNotIn(999, state.events)
+        self.assertNotIn("L999-1777_1_3", state.markets)
+        self.assertNotIn("L888-1_1_3", state.selections)
+
+    def test_delete_market_cascades_cached_selections(self) -> None:
+        state = ZapFeedState()
+        state.apply_body(
+            "F|EV;FI=999;CL=1;IT=L1-1-5-999_1_3;"
+            "NA=Home v Away;FS=1;OI=888;|"
+            "MA;FI=888;ID=1777;IT=L999-1777_1_3;NA=Fulltime Result;|"
+            "PA;FI=888;ID=1;IT=L888-1_1_3;NA=Home;OD=2/1;OR=0;|"
+            "PA;FI=888;ID=2;IT=L888-2_1_3;NA=Away;OD=3/1;OR=1;|"
+        )
+
+        state.apply_body("D|", path="L999-1777_1_3")
+
+        self.assertIn(999, state.events)
+        self.assertNotIn("L999-1777_1_3", state.markets)
+        self.assertNotIn("L888-1_1_3", state.selections)
+        self.assertNotIn("L888-2_1_3", state.selections)
+        self.assertEqual(state.export_events(), [])
+
+    def test_delete_selection_accepts_ov_path(self) -> None:
+        state = ZapFeedState()
+        state.apply_body(
+            "F|EV;FI=999;CL=1;NA=Home v Away;FS=1;OI=888;|"
+            "MA;FI=888;ID=1777;IT=L999-1777_1_3;NA=Fulltime Result;|"
+            "PA;FI=888;ID=1;IT=L888-1_1_3;NA=Home;OD=2/1;OR=0;|"
+        )
+
+        state.apply_body("D|", path="OVL888-1_1_3")
+
+        self.assertNotIn("L888-1_1_3", state.selections)
 
     def test_timer_runs_for_live_without_tu(self) -> None:
         from bet365.mapper import _timer_payload
