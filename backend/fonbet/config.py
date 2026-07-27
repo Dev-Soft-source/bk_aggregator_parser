@@ -23,6 +23,12 @@ class FonbetApiConfig:
     lang: str
     poll_interval: float
     timeout: float
+    # Re-fetch listLight every N polls so absent/finished matches prune from DB.
+    # 0 disables periodic snapshots (only startup / error reset).
+    snapshot_every: int
+    # Drop place=line rows whose kickoff is older than now - grace (hours).
+    # 0 = delete as soon as start_time is in the past.
+    line_past_grace_hours: int
 
     @classmethod
     def from_env(cls) -> "FonbetApiConfig":
@@ -33,6 +39,8 @@ class FonbetApiConfig:
             lang=os.getenv("FONBET_LANG", "en"),
             poll_interval=float(os.getenv("POLL_INTERVAL_SECONDS", str(DEFAULT_POLL_INTERVAL))),
             timeout=float(os.getenv("FONBET_HTTP_TIMEOUT", "30")),
+            snapshot_every=int(os.getenv("FONBET_SNAPSHOT_EVERY", "20")),
+            line_past_grace_hours=int(os.getenv("FONBET_LINE_PAST_GRACE_HOURS", "0")),
         )
 
     def list_url(self, version: int) -> str:

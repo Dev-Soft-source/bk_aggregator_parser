@@ -30,10 +30,19 @@ from fonbet.parsers import (
     unix_to_datetime,
 )
 from fonbet.odds_config import allowed_factor_ids, factor_is_allowed
+from fonbet.lifecycle import (
+    active_live_match_ids,
+    collect_soft_finished_match_ids,
+    normalize_fonbet_betting_state,
+    should_keep_last_odds,
+    should_persist_fixture,
+)
 from retention import (
     current_utc_year,
+    delete_matches_by_ids,
     prune_absent_matches,
     prune_orphan_catalog,
+    prune_past_place_matches,
     prune_snapshots,
     prune_snapshots_to_current,
     prune_stale_matches,
@@ -180,6 +189,7 @@ def import_packet(
     prune_matches_before_year: int | None = None,
     *,
     keep_current_only: bool = True,
+    line_past_grace_hours: int | None = None,
 ) -> tuple[int, dict[str, int]]:
     sports = packet.get("sports", [])
     events = packet.get("events", [])
@@ -188,6 +198,11 @@ def import_packet(
     live_infos = {item["eventId"]: item for item in packet.get("liveEventInfos", [])}
     custom_factors = packet.get("customFactors", [])
     events_by_id = {event["id"]: event for event in events}
+
+    if line_past_grace_hours is None:
+        from fonbet.config import FonbetApiConfig
+
+        line_past_grace_hours = FonbetApiConfig.from_env().line_past_grace_hours
 
     with conn.cursor() as cur:
         site_id = upsert_site(cur, site_name)
@@ -304,10 +319,33 @@ def import_packet(
             leagues_inserted += 1
 
         level_one_events = [event for event in events if event.get("level") == 1]
+        known_match_ids = _load_known_match_ids(cur, site_id)
+        soft_finished_ids = collect_soft_finished_match_ids(
+            events=events,
+            events_by_id=events_by_id,
+            event_miscs=event_miscs,
+            live_infos=live_infos,
+            event_blocks=event_blocks,
+            custom_factors=custom_factors,
+            sports_by_id=sports_by_id,
+            league_to_sport=league_to_sport,
+            known_match_ids=known_match_ids,
+            resolve_match_id=resolve_match_id_for_update,
+        )
         match_ids: set[int] = set()
         matches_inserted = 0
 
         for event in level_one_events:
+            place = event.get("place", "unknown")
+            # Live snapshot poll: only persist active live rows. Finished /
+            # notActive omitted so prune_absent(place=live) removes prior live.
+            if not should_persist_fixture(place, mode="live") and not should_persist_fixture(
+                place, mode="line"
+            ):
+                continue
+            if int(event["id"]) in soft_finished_ids:
+                continue
+
             league_id = event.get("sportId")
             sport_id = league_to_sport.get(league_id) if league_id else None
             if sport_id is None:
@@ -348,7 +386,7 @@ def import_packet(
                     event.get("team2Id"),
                     start_time,
                     event_year,
-                    event.get("place", "unknown"),
+                    place,
                     event.get("num"),
                     event.get("priority"),
                     snapshot_id,
@@ -382,14 +420,16 @@ def import_packet(
                 (
                     site_id,
                     match_id,
-                    (block or {}).get("state", "unblocked"),
+                    normalize_fonbet_betting_state(
+                        (block or {}).get("state", "unblocked")
+                    ),
                     (block or {}).get("factors"),
                     snapshot_id,
                 ),
             )
             status_written.add(match_id)
 
-        known_match_ids = _load_known_match_ids(cur, site_id)
+        known_match_ids = known_match_ids | match_ids
         score_update_ids = _collect_score_update_ids(
             match_ids,
             event_miscs,
@@ -401,6 +441,8 @@ def import_packet(
         scores_updated = 0
 
         for match_id in score_update_ids:
+            if match_id in soft_finished_ids:
+                continue
             misc, live = _merge_live_payload(
                 match_id,
                 event_miscs,
@@ -477,7 +519,9 @@ def import_packet(
                         (
                             site_id,
                             match_id,
-                            block.get("state", "unknown"),
+                            normalize_fonbet_betting_state(
+                                block.get("state", "unknown")
+                            ),
                             block.get("factors"),
                             snapshot_id,
                         ),
@@ -494,6 +538,8 @@ def import_packet(
                 )
             if root_match_id is None or root_match_id not in known_match_ids:
                 continue
+            if root_match_id in soft_finished_ids:
+                continue
             if market_event_id != root_match_id:
                 continue
 
@@ -502,6 +548,9 @@ def import_packet(
 
             for factor in entry.get("factors", []):
                 if not factor_is_allowed(factor["f"]):
+                    continue
+                # Suspended (v<=0): do not overwrite last recoverable odds.
+                if not should_keep_last_odds(factor.get("v")):
                     continue
                 line_param_raw = factor.get("p")
                 odds_rows.append(
@@ -581,7 +630,9 @@ def import_packet(
                     (
                         site_id,
                         mid,
-                        (block or {}).get("state", "unblocked"),
+                        normalize_fonbet_betting_state(
+                            (block or {}).get("state", "unblocked")
+                        ),
                         (block or {}).get("factors"),
                         snapshot_id,
                     ),
@@ -599,14 +650,43 @@ def import_packet(
         leagues_deleted = 0
         sports_deleted = 0
 
-        # Full listLight snapshot = current live set; drop finished matches.
-        if keep_current_only and is_snapshot_packet(packet) and match_ids:
-            removed = prune_absent_matches(cur, site_id, match_ids, place="live")
-            matches_deleted += removed
-            if removed:
-                orphans = prune_orphan_catalog(cur, site_id)
-                leagues_deleted = orphans.get("leagues_deleted", 0)
-                sports_deleted = orphans.get("sports_deleted", 0)
+        # Soft-finished lingerers (FT blocked @90', esports at ML, etc.).
+        if keep_current_only and soft_finished_ids:
+            removed_soft = delete_matches_by_ids(
+                cur, site_id, soft_finished_ids, place="live"
+            )
+            matches_deleted += removed_soft
+
+        # Prematch/line: drop kickoffs that are already in the past (no line poller
+        # catalog prune yet — start_time is the authority).
+        if keep_current_only and line_past_grace_hours is not None and line_past_grace_hours >= 0:
+            removed_line = prune_past_place_matches(
+                cur,
+                site_id,
+                place="line",
+                grace_hours=int(line_past_grace_hours),
+            )
+            matches_deleted += removed_line
+
+        # Full listLight snapshot = current live set; drop finished / absent matches.
+        if keep_current_only and is_snapshot_packet(packet):
+            live_keep = (active_live_match_ids(level_one_events) & match_ids) - soft_finished_ids
+            if live_keep:
+                removed = prune_absent_matches(cur, site_id, live_keep, place="live")
+                matches_deleted += removed
+                if removed:
+                    orphans = prune_orphan_catalog(cur, site_id)
+                    leagues_deleted = orphans.get("leagues_deleted", 0)
+                    sports_deleted = orphans.get("sports_deleted", 0)
+            elif soft_finished_ids:
+                # Snapshot contained only finished lingerers — clear remaining live rows
+                # that were soft-deleted above; nothing else to keep.
+                pass
+
+        if keep_current_only and (soft_finished_ids or matches_deleted):
+            orphans = prune_orphan_catalog(cur, site_id)
+            leagues_deleted = max(leagues_deleted, orphans.get("leagues_deleted", 0))
+            sports_deleted = max(sports_deleted, orphans.get("sports_deleted", 0))
 
         if keep_current_only:
             snapshots_deleted += prune_snapshots_to_current(cur, site_id, snapshot_id)
@@ -709,6 +789,8 @@ def main() -> None:
                 lang=api_config.lang,
                 poll_interval=args.interval,
                 timeout=api_config.timeout,
+                snapshot_every=api_config.snapshot_every,
+                line_past_grace_hours=api_config.line_past_grace_hours,
             )
         appendix_path = resolve_appendix_path(
             Path(args.appendix) if args.appendix else None

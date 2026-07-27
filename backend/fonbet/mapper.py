@@ -14,6 +14,12 @@ from adapters.base import (
     SportRef,
     TournamentRef,
 )
+from fonbet.lifecycle import (
+    collect_soft_finished_match_ids,
+    normalize_fonbet_betting_state,
+    should_keep_last_odds,
+    should_persist_fixture,
+)
 from fonbet.odds_config import (
     allowed_factor_ids,
     factor_is_allowed,
@@ -167,9 +173,7 @@ def discover_events(packet: dict[str, Any], mode: str = "live") -> list[EventRef
         if event.get("level") != 1:
             continue
         place = event.get("place", "unknown")
-        if mode == "live" and place not in ("live", "notActive"):
-            continue
-        if mode == "prematch" and place != "line":
+        if mode != "all" and not should_persist_fixture(place, mode=mode):
             continue
 
         league_id = event.get("sportId")
@@ -201,14 +205,35 @@ def map_packet_to_changes(
 ) -> list[Change]:
     idx = _index_packet(packet)
     known = resolve_known_match_ids(idx, known_match_ids)
-    _, league_to_sport = build_sports_maps(idx["sports"])
+    sports_by_id, league_to_sport = build_sports_maps(idx["sports"])
     version = idx["packet_version"]
     from_version = idx["from_version"]
     changes: list[Change] = []
     fixture_ids: list[int] = []
+    soft_finished = collect_soft_finished_match_ids(
+        events=idx["events"],
+        events_by_id=idx["events_by_id"],
+        event_miscs=idx["event_miscs"],
+        live_infos=idx["live_infos"],
+        event_blocks=idx["event_blocks"],
+        custom_factors=idx["custom_factors"],
+        sports_by_id=sports_by_id,
+        league_to_sport=league_to_sport,
+        known_match_ids=known,
+        resolve_match_id=resolve_match_id_for_update,
+    )
 
     for event in idx["events"]:
         if event.get("level") != 1:
+            continue
+        place = event.get("place", "unknown")
+        # Live mapper keeps active live fixtures; line/prematch handled when mode exists.
+        # Deltas may still carry notActive/finished rows — skip so consumers prune.
+        if not should_persist_fixture(place, mode="live") and not should_persist_fixture(
+            place, mode="line"
+        ):
+            continue
+        if int(event["id"]) in soft_finished:
             continue
         league_id = event.get("sportId")
         sport_id = league_to_sport.get(league_id) if league_id else None
@@ -230,7 +255,7 @@ def map_packet_to_changes(
                     "team1_id": event.get("team1Id"),
                     "team2_id": event.get("team2Id"),
                     "start_time_unix": event.get("startTime"),
-                    "place": event.get("place", "unknown"),
+                    "place": place,
                     "priority": event.get("priority"),
                     "event_num": event.get("num"),
                 },
@@ -252,7 +277,9 @@ def map_packet_to_changes(
                 packet_version=version,
                 from_version=from_version,
                 payload={
-                    "state": (block or {}).get("state", "unblocked"),
+                    "state": normalize_fonbet_betting_state(
+                        (block or {}).get("state", "unblocked")
+                    ),
                     "partial_factor_ids": (block or {}).get("factors"),
                 },
             )
@@ -269,6 +296,8 @@ def map_packet_to_changes(
     )
 
     for match_id in score_update_ids:
+        if match_id in soft_finished:
+            continue
         misc, live = _merge_live_payload(
             match_id,
             idx["event_miscs"],
@@ -316,7 +345,9 @@ def map_packet_to_changes(
                         packet_version=version,
                         from_version=from_version,
                         payload={
-                            "state": block.get("state", "unknown"),
+                            "state": normalize_fonbet_betting_state(
+                                block.get("state", "unknown")
+                            ),
                             "partial_factor_ids": block.get("factors"),
                         },
                     )
@@ -331,6 +362,8 @@ def map_packet_to_changes(
             )
         if root_match_id is None or root_match_id not in known:
             continue
+        if root_match_id in soft_finished:
+            continue
         if market_event_id != root_match_id:
             continue
 
@@ -341,6 +374,9 @@ def map_packet_to_changes(
         for factor in entry.get("factors", []):
             factor_id = factor["f"]
             if not factor_is_allowed(factor_id):
+                continue
+            # Suspended selections (v<=0): omit so DB / consumers keep last price.
+            if not should_keep_last_odds(factor.get("v")):
                 continue
             line_param_raw = factor.get("p")
             outcomes.append(
@@ -412,7 +448,9 @@ def map_packet_to_changes(
                 packet_version=version,
                 from_version=from_version,
                 payload={
-                    "state": (block or {}).get("state", "unblocked"),
+                    "state": normalize_fonbet_betting_state(
+                        (block or {}).get("state", "unblocked")
+                    ),
                     "partial_factor_ids": (block or {}).get("factors"),
                 },
             )

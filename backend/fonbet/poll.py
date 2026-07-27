@@ -68,7 +68,11 @@ def run_poll(
         while max_iterations is None or iteration < max_iterations:
             iteration += 1
             try:
-                if version is None:
+                force_snapshot = version is None or (
+                    api_config.snapshot_every > 0
+                    and iteration % api_config.snapshot_every == 0
+                )
+                if force_snapshot:
                     packet = fetch_list_light(api_config)
                     source = api_config.list_light_url
                 else:
@@ -87,6 +91,7 @@ def run_poll(
                     appendix_path=appendix_path,
                     retain_snapshot_years=retain_years,
                     prune_matches_before_year=prune_matches_before_year,
+                    line_past_grace_hours=api_config.line_past_grace_hours,
                 )
                 version = new_version
 
@@ -96,6 +101,7 @@ def run_poll(
                     f"scores={counts['scores_updated']} odds={counts['odds_lines']} "
                     f"pruned_matches={counts.get('matches_deleted', 0)} "
                     f"pruned_snapshots={counts.get('snapshots_deleted', 0)}"
+                    + (" [listLight]" if force_snapshot else "")
                 )
             except Exception as exc:
                 logger.exception("Poll iteration %s failed: %s", iteration, exc)
@@ -163,6 +169,8 @@ def main() -> None:
             lang=api_config.lang,
             poll_interval=args.interval,
             timeout=api_config.timeout,
+            snapshot_every=api_config.snapshot_every,
+            line_past_grace_hours=api_config.line_past_grace_hours,
         )
 
     site_name = resolve_site_name(args.site_name, db_config.site_name)

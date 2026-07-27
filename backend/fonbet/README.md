@@ -29,6 +29,12 @@ Configure URLs via `backend/.env` (`FONBET_LIST_LIGHT_URL`, `FONBET_LIST_URL_BAS
 - `factor_id` (`f`) is numeric; UOF `market_id` mapping is a core concern (Appendix C).
 - Delta packets (`fromVersion` > 0) may omit sports in `events[]`; scores still update via `liveEventInfos`.
 - Pass `known_match_ids` when consuming deltas so odds/scores apply to matches already in core/DB.
+- `place=notActive` without `willBeLive` = left live board (finished for prune); with `willBeLive` = upcoming linger (not persisted until `live`).
+- Suspended selections use `v=0` — importer/mapper **skip** those rows so last odds stay.
+- Soft-finished lingerers (football FT blocked @90', esports at match length) are deleted even while Fonbet still sends `place=live`.
+- Poll refreshes with `listLight` every `FONBET_SNAPSHOT_EVERY` ticks (default 20) so matches that left the feed are pruned.
+- Prematch `place=line` rows with `start_time` already past are deleted each poll (`FONBET_LINE_PAST_GRACE_HOURS`, default `0`).
+- Lifecycle helpers: `fonbet/lifecycle.py`. Audit: `docs/acceptance/fonbet_audit.md`.
 
 ## Usage
 
@@ -55,9 +61,10 @@ python main.py --poll                    # same as poll (legacy)
 
 ## Retention
 
-Live poll keeps **current data only**:
+Live poll keeps **current live data only**:
 
-- On each full `listLight` snapshot, live matches no longer in the feed are deleted
+- On each full `listLight` snapshot, `place=live` matches no longer in the active live set are deleted
+- Finished / `notActive` rows are not written; prior live rows are pruned
 - Import snapshots collapse to the latest one (no historical pile-up)
 
 ## Module layout
@@ -68,10 +75,14 @@ fonbet/
   adapter.py          # FonbetAdapter — poll + health
   mapper.py           # packet → Change DTOs
   importer.py         # PostgreSQL import
+  lifecycle.py        # place/finish/suspend helpers (Track B2)
   poll.py             # poll loop
   parsers.py          # country/league/match parsing
-  sports_reference.py # Appendix A mapping
+  sports_reference.py # Appendix A mapping (pre-B3)
+  odds_config.py      # main-line factor ids (921/922/923)
   config.py           # FonbetApiConfig
   test.json           # sample delta packet
-  Appendix_A_sports_EN.md
+  tests/
 ```
+
+Acceptance docs: `docs/acceptance/fonbet_audit.md`, `fonbet_lifecycle.md`.

@@ -146,6 +146,39 @@ def prune_absent_matches(
     return cur.rowcount
 
 
+def delete_matches_by_ids(
+    cur: psycopg2.extensions.cursor,
+    site_id: int,
+    match_ids: Collection[int],
+    *,
+    place: str | None = "live",
+) -> int:
+    """Delete specific match ids (e.g. soft-finished lingerers still in the feed)."""
+    ids = sorted({int(x) for x in match_ids})
+    if not ids:
+        return 0
+    if place:
+        cur.execute(
+            """
+            DELETE FROM matches
+            WHERE site_id = %s
+              AND place = %s
+              AND id = ANY(%s)
+            """,
+            (site_id, place, ids),
+        )
+    else:
+        cur.execute(
+            """
+            DELETE FROM matches
+            WHERE site_id = %s
+              AND id = ANY(%s)
+            """,
+            (site_id, ids),
+        )
+    return cur.rowcount
+
+
 def prune_past_place_matches(
     cur: psycopg2.extensions.cursor,
     site_id: int,

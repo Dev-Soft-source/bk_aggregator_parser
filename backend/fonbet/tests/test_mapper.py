@@ -49,7 +49,7 @@ class FonbetMapperTests(unittest.TestCase):
     def test_discover_events_live_filter(self) -> None:
         events = discover_events(self.packet, mode="live")
         for event in events:
-            self.assertIn(event.place, ("live", "notActive"))
+            self.assertEqual(event.place, "live")
 
     def test_packet_summary_counts(self) -> None:
         summary = packet_summary(self.packet)
@@ -57,8 +57,11 @@ class FonbetMapperTests(unittest.TestCase):
         self.assertEqual(summary.fixtures, sum(1 for c in changes if c.change_type == ChangeType.FIXTURE))
         self.assertGreaterEqual(summary.odds_outcomes, 0)
 
-    def test_odds_at_most_two_per_match(self) -> None:
+    def test_odds_at_most_configured_factor_slots(self) -> None:
+        from fonbet.odds_config import ordered_factor_ids
+
         changes = map_packet_to_changes(self.packet)
+        limit = len(ordered_factor_ids())
         by_match: dict[int, int] = {}
         for change in changes:
             if change.change_type != ChangeType.ODDS:
@@ -69,8 +72,8 @@ class FonbetMapperTests(unittest.TestCase):
         for match_id, count in by_match.items():
             self.assertLessEqual(
                 count,
-                2,
-                f"match {match_id} has {count} odds outcomes, expected <= 2",
+                limit,
+                f"match {match_id} has {count} odds outcomes, expected <= {limit}",
             )
 
     def test_every_fixture_gets_betting_status(self) -> None:

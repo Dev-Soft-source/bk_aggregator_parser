@@ -78,7 +78,11 @@ class FonbetAdapter:
         return mapper.packet_summary(packet, known_match_ids=known)
 
     def fetch_next_packet(self) -> dict[str, Any]:
-        if self._version is None:
+        every = getattr(self._api, "snapshot_every", 0) or 0
+        force_snapshot = self._version is None or (
+            every > 0 and self._poll_count > 0 and self._poll_count % every == 0
+        )
+        if force_snapshot:
             return api.fetch_list_light(self._api)
         return api.fetch_list(self._version, self._api)
 

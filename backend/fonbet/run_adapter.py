@@ -69,6 +69,8 @@ def main() -> None:
                 lang=cfg.lang,
                 poll_interval=args.interval,
                 timeout=cfg.timeout,
+                snapshot_every=cfg.snapshot_every,
+                line_past_grace_hours=cfg.line_past_grace_hours,
             )
         )
 
