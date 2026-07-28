@@ -108,6 +108,7 @@ class FonbetAdapter:
     ) -> Iterator[tuple[dict[str, Any], list[Change], PacketSummary]]:
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
+            cycle_started_at = time.monotonic()
             iteration += 1
             try:
                 packet = self.fetch_next_packet()
@@ -122,7 +123,8 @@ class FonbetAdapter:
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
-            time.sleep(self._api.poll_interval)
+            elapsed = time.monotonic() - cycle_started_at
+            time.sleep(max(0.0, self._api.poll_interval - elapsed))
 
     def stream_live_changes_resilient(
         self,
@@ -133,6 +135,7 @@ class FonbetAdapter:
         iteration = 0
         consecutive_failures = 0
         while max_iterations is None or iteration < max_iterations:
+            cycle_started_at = time.monotonic()
             iteration += 1
             try:
                 packet = self.fetch_next_packet()
@@ -164,7 +167,8 @@ class FonbetAdapter:
                 )
                 time.sleep(backoff)
             else:
-                time.sleep(self._api.poll_interval)
+                elapsed = time.monotonic() - cycle_started_at
+                time.sleep(max(0.0, self._api.poll_interval - elapsed))
 
     def health(self) -> HealthStatus:
         ok = self._last_error is None and self._last_success_at is not None

@@ -13,7 +13,7 @@ DEFAULT_LIST_LIGHT_URL = (
 DEFAULT_LIST_URL_BASE = (
     "https://line-lb54-w.bk6bba-resources.com/ma/events/list"
 )
-DEFAULT_POLL_INTERVAL = 3.0
+DEFAULT_POLL_INTERVAL = 4.5
 # Connect fails fast; read allows large listLight JSON.
 DEFAULT_CONNECT_TIMEOUT = 5.0
 DEFAULT_READ_TIMEOUT = 20.0
@@ -51,7 +51,12 @@ class FonbetApiConfig:
             list_url_base=os.getenv("FONBET_LIST_URL_BASE", DEFAULT_LIST_URL_BASE),
             scope_market=int(os.getenv("FONBET_SCOPE_MARKET", "1600")),
             lang=os.getenv("FONBET_LANG", "en"),
-            poll_interval=float(os.getenv("POLL_INTERVAL_SECONDS", str(DEFAULT_POLL_INTERVAL))),
+            poll_interval=float(
+                os.getenv(
+                    "FONBET_POLL_INTERVAL_SECONDS",
+                    os.getenv("POLL_INTERVAL_SECONDS", str(DEFAULT_POLL_INTERVAL)),
+                )
+            ),
             timeout=read_timeout,
             connect_timeout=connect_timeout,
             snapshot_every=int(os.getenv("FONBET_SNAPSHOT_EVERY", "20")),

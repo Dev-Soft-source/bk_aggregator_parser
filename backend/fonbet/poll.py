@@ -67,6 +67,7 @@ def run_poll(
             run_migration(conn, migrate_path)
 
         while max_iterations is None or iteration < max_iterations:
+            cycle_started_at = time.monotonic()
             iteration += 1
             try:
                 force_snapshot = version is None or (
@@ -139,7 +140,9 @@ def run_poll(
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
-            time.sleep(api_config.poll_interval)
+            elapsed = time.monotonic() - cycle_started_at
+            sleep_for = max(0.0, api_config.poll_interval - elapsed)
+            time.sleep(sleep_for)
 
 
 def main() -> None:
