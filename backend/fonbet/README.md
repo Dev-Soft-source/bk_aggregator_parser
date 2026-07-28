@@ -34,6 +34,7 @@ Configure URLs via `backend/.env` (`FONBET_LIST_LIGHT_URL`, `FONBET_LIST_URL_BAS
 - Soft-finished lingerers (football FT blocked @90', esports at match length) are deleted even while Fonbet still sends `place=live`.
 - Poll refreshes with `listLight` every `FONBET_SNAPSHOT_EVERY` ticks (default 20) so matches that left the feed are pruned.
 - Prematch `place=line` rows with `start_time` already past are deleted each poll (`FONBET_LINE_PAST_GRACE_HOURS`, default `0`).
+- Transient HTTP errors (SSL EOF, connection reset) retry with backoff (`FONBET_HTTP_RETRIES`, `FONBET_FAILURE_BACKOFF_MAX`).
 - Lifecycle helpers: `fonbet/lifecycle.py`. Audit: `docs/acceptance/fonbet_audit.md`.
 
 ## Usage

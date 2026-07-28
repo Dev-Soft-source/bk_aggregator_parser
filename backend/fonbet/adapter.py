@@ -10,6 +10,7 @@ from typing import Any, Iterator
 
 from adapters.base import Change, EventRef, HealthStatus, PacketSummary, SportRef, TournamentRef
 from fonbet import api, mapper
+from fonbet.api import _is_retryable
 from fonbet.config import FonbetApiConfig
 
 logger = logging.getLogger(__name__)
@@ -130,21 +131,40 @@ class FonbetAdapter:
     ) -> Iterator[tuple[dict[str, Any], list[Change], PacketSummary]]:
         """Poll loop that resets to listLight after errors (same as poll.py)."""
         iteration = 0
+        consecutive_failures = 0
         while max_iterations is None or iteration < max_iterations:
             iteration += 1
             try:
                 packet = self.fetch_next_packet()
                 changes, summary = self.process_packet(packet)
+                consecutive_failures = 0
                 yield packet, changes, summary
             except Exception as exc:
                 self._error_count += 1
                 self._last_error = str(exc)
-                logger.exception("Fonbet poll iteration %s failed: %s", iteration, exc)
+                consecutive_failures += 1
+                if _is_retryable(exc):
+                    logger.warning(
+                        "Fonbet poll iteration %s failed (transient): %s",
+                        iteration,
+                        exc,
+                    )
+                else:
+                    logger.exception(
+                        "Fonbet poll iteration %s failed: %s", iteration, exc
+                    )
                 self._version = None
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
-            time.sleep(self._api.poll_interval)
+            if consecutive_failures:
+                backoff = min(
+                    self._api.failure_backoff_max,
+                    self._api.poll_interval * (2 ** min(consecutive_failures - 1, 5)),
+                )
+                time.sleep(backoff)
+            else:
+                time.sleep(self._api.poll_interval)
 
     def health(self) -> HealthStatus:
         ok = self._last_error is None and self._last_success_at is not None

@@ -789,8 +789,12 @@ def main() -> None:
                 lang=api_config.lang,
                 poll_interval=args.interval,
                 timeout=api_config.timeout,
+                connect_timeout=api_config.connect_timeout,
                 snapshot_every=api_config.snapshot_every,
                 line_past_grace_hours=api_config.line_past_grace_hours,
+                http_retries=api_config.http_retries,
+                http_retry_sleep=api_config.http_retry_sleep,
+                failure_backoff_max=api_config.failure_backoff_max,
             )
         appendix_path = resolve_appendix_path(
             Path(args.appendix) if args.appendix else None

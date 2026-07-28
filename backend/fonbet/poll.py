@@ -10,7 +10,7 @@ from pathlib import Path
 from config import DatabaseConfig
 from db import connect, init_schema, run_migration
 from fonbet.sports_reference import resolve_appendix_path
-from fonbet.api import FonbetApiError, fetch_list, fetch_list_light, packet_version
+from fonbet.api import FonbetApiError, _is_retryable, fetch_list, fetch_list_light, packet_version
 from fonbet.config import FonbetApiConfig
 from fonbet.importer import import_packet
 
@@ -53,6 +53,7 @@ def run_poll(
 ) -> None:
     iteration = 0
     version: int | None = None
+    consecutive_failures = 0
     retain_years = (
         db_config.retain_snapshot_years
         if retain_snapshot_years is None
@@ -94,6 +95,7 @@ def run_poll(
                     line_past_grace_hours=api_config.line_past_grace_hours,
                 )
                 version = new_version
+                consecutive_failures = 0
 
                 print(
                     f"[{iteration}] snapshot={snapshot_id} packetVersion={version} "
@@ -104,13 +106,36 @@ def run_poll(
                     + (" [listLight]" if force_snapshot else "")
                 )
             except Exception as exc:
-                logger.exception("Poll iteration %s failed: %s", iteration, exc)
-                print(f"[{iteration}] ERROR: {exc} — resetting with listLight on next tick")
+                consecutive_failures += 1
+                if _is_retryable(exc):
+                    logger.warning(
+                        "Poll iteration %s failed (transient): %s",
+                        iteration,
+                        exc,
+                    )
+                    if consecutive_failures == 1 or consecutive_failures % 10 == 0:
+                        logger.debug("Poll failure detail", exc_info=True)
+                else:
+                    logger.exception("Poll iteration %s failed: %s", iteration, exc)
+
+                backoff = min(
+                    api_config.failure_backoff_max,
+                    api_config.poll_interval * (2 ** min(consecutive_failures - 1, 5)),
+                )
+                print(
+                    f"[{iteration}] ERROR: {exc} — retry in {backoff:.0f}s "
+                    f"(failures={consecutive_failures}, reset listLight)"
+                )
                 try:
                     conn.rollback()
                 except Exception:
                     logger.exception("Rollback after poll failure failed")
                 version = None
+
+                if max_iterations is not None and iteration >= max_iterations:
+                    break
+                time.sleep(backoff)
+                continue
 
             if max_iterations is not None and iteration >= max_iterations:
                 break
@@ -169,8 +194,12 @@ def main() -> None:
             lang=api_config.lang,
             poll_interval=args.interval,
             timeout=api_config.timeout,
+            connect_timeout=api_config.connect_timeout,
             snapshot_every=api_config.snapshot_every,
             line_past_grace_hours=api_config.line_past_grace_hours,
+            http_retries=api_config.http_retries,
+            http_retry_sleep=api_config.http_retry_sleep,
+            failure_backoff_max=api_config.failure_backoff_max,
         )
 
     site_name = resolve_site_name(args.site_name, db_config.site_name)

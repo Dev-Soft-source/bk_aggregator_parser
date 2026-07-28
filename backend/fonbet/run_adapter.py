@@ -69,8 +69,12 @@ def main() -> None:
                 lang=cfg.lang,
                 poll_interval=args.interval,
                 timeout=cfg.timeout,
+                connect_timeout=cfg.connect_timeout,
                 snapshot_every=cfg.snapshot_every,
                 line_past_grace_hours=cfg.line_past_grace_hours,
+                http_retries=cfg.http_retries,
+                http_retry_sleep=cfg.http_retry_sleep,
+                failure_backoff_max=cfg.failure_backoff_max,
             )
         )
 
